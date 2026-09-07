@@ -834,10 +834,20 @@ check_footers_in_body() {
     token="${BASH_REMATCH[1]}"
     is_known_footer_token "$token" || continue
 
-    warning footer "footer \"${token}\" sits inside the body" \
-      --at $((idx + 1)) 1 "${#token}" \
-      --why 'footers MUST start one blank line after the body, otherwise they are parsed as body text' \
-      --fix 'move it to the footer block at the end of the message'
+    # Telling someone to move a trailer "to the end" is useless when it is
+    # already there; sharing the last paragraph with prose is its own mistake,
+    # and it costs the neighbouring trailers too.
+    if ((idx >= footer_start)); then
+      warning footer "footer \"${token}\" shares a paragraph with body text" \
+        --at $((idx + 1)) 1 "${#token}" \
+        --why 'git drops a whole trailer block over one line that does not parse, taking this trailer with it' \
+        --fix 'give the trailers a paragraph of their own, with no prose lines in it'
+    else
+      warning footer "footer \"${token}\" sits inside the body" \
+        --at $((idx + 1)) 1 "${#token}" \
+        --why 'footers MUST start one blank line after the body, otherwise they are parsed as body text' \
+        --fix 'move it to the footer block at the end of the message'
+    fi
   done
 }
 
