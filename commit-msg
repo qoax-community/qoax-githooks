@@ -6,12 +6,13 @@
 # Collects *every* violation in a single pass, then prints each one with the
 # offending text, the rule it breaks, and a concrete fix.
 #
-# Errors abort the commit and are reserved for the spec's own MUSTs: a missing
-# type or ": " separator, an empty scope, a body not separated from the
-# subject, a malformed BREAKING CHANGE token, a footer token with spaces in it.
-# Everything the spec permits but this repo would rather avoid — casing, an
-# unlisted type, subject length, imperative mood, a trailing full stop, body
-# width — is a warning, printed and then allowed through.
+# Every finding is an error and every error aborts the commit. Some come from
+# the spec — a missing type or ": " separator, an empty scope, a body not
+# separated from the subject, a malformed BREAKING CHANGE token, a footer token
+# with spaces in it. The rest are this repo's own house style, stricter than the
+# spec allows for a parser: lowercase types and scopes, a list of types, subject
+# length, imperative mood, no capital or full stop, body width. Each finding
+# says which it is, so nobody has to guess who to argue with.
 #
 # Enable:   git config core.hooksPath .githooks
 # Bypass:   git commit --no-verify
@@ -105,9 +106,12 @@ TYPES=()
 SUBJECT_MAX=72
 BODY_MAX=100
 COMMENT_CHAR='#'
+STRIP_COMMENTS=1
 
 # The cleaned-up commit message, one line per element, filled in by read_message.
 LINES=()
+# Set when a comment line was dropped from where the subject would otherwise be.
+SUBJECT_MAY_BE_COMMENT=0
 
 # --- Helpers ----------------------------------------------------------------
 
@@ -195,6 +199,15 @@ load_config() {
     *) COMMENT_CHAR='#' ;;
   esac
 
+  # Only the strip mode removes comments. whitespace — which is what a -m
+  # message gets — keeps them, and so does verbatim, so a "#" line there is
+  # content that git will store, not a comment to drop.
+  configured="$(git config --get commit.cleanup || true)"
+  case "$configured" in
+    whitespace|verbatim|scissors) STRIP_COMMENTS=0 ;;
+    *) STRIP_COMMENTS=1 ;;
+  esac
+
   return 0
 }
 
@@ -224,9 +237,22 @@ read_message() {
   for line in ${raw[@]+"${raw[@]}"}; do
     # Everything from the scissors line down is the verbose diff, not message.
     [[ $line == "$marker"* && $line == *'>8'* && $line == *--* ]] && break
-    [[ $line == "$marker"* ]] && continue
+    ((STRIP_COMMENTS)) && [[ $line == "$marker"* ]] && continue
     kept+=("$line")
   done
+
+  # With commit.cleanup unset git decides by whether it opened an editor, which
+  # a hook cannot see: comments are dropped for an edited message and kept for
+  # "git commit -m". Stripping is the right guess for the editor, but it would
+  # hide a comment standing where the subject belongs, so say so instead.
+  SUBJECT_MAY_BE_COMMENT=0
+  if ((STRIP_COMMENTS)) && ((${#kept[@]})); then
+    for line in ${raw[@]+"${raw[@]}"}; do
+      is_blank "$line" && continue
+      [[ $line == "$marker"* ]] && SUBJECT_MAY_BE_COMMENT=1
+      break
+    done
+  fi
 
   local first=0 last=$((${#kept[@]} - 1))
   while ((first <= last)) && is_blank "${kept[first]}"; do first=$((first + 1)); done
@@ -311,6 +337,9 @@ add_finding() {
 }
 
 error()   { add_finding error "$@"; }
+# Kept, but nothing calls it: a rule this hook cannot state with confidence is
+# a rule it should not have, and a warning is invisible in CI, where the commit
+# it would comment on has already been written.
 warning() { add_finding warning "$@"; }
 
 # --- Subject checks ---------------------------------------------------------
@@ -326,6 +355,13 @@ SUBJECT_DESC_COL=0    # column of the first description character, 1-based
 
 check_subject() {
   local raw="${LINES[0]}"
+
+  if ((SUBJECT_MAY_BE_COMMENT)); then
+    error subject 'a comment line stands where the subject belongs' \
+      --at 1 1 "${#raw}" \
+      --why "git keeps ${COMMENT_CHAR} lines for \"git commit -m\" and drops them for an edited message, so this either is the subject or hides it" \
+      --fix "remove the ${COMMENT_CHAR} line above the subject, or move your subject above it"
+  fi
 
   check_subject_indent "$raw"
   check_subject_length "$(trim "$raw")"
@@ -374,9 +410,9 @@ check_subject_length() {
   local subject="$1"
   ((${#subject} > SUBJECT_MAX)) || return 0
 
-  warning subject "subject is ${#subject} characters (max ${SUBJECT_MAX})" \
+  error subject "subject is ${#subject} characters (max ${SUBJECT_MAX})" \
     --at 1 $((SUBJECT_MAX + 1)) $((${#subject} - SUBJECT_MAX)) \
-    --why 'no spec limit, but longer subjects are truncated in git log and in the GitHub/GitLab UI' \
+    --why 'no spec limit; this repo caps the subject so git log and the GitHub UI do not truncate it' \
     --fix 'shorten the description and move the detail into the body'
 }
 
@@ -516,7 +552,7 @@ check_type() {
   fi
 
   if [[ ! $SUBJECT_TYPE =~ ^[A-Za-z]+$ ]]; then
-    warning subject "unusual type \"${SUBJECT_TYPE}\"" \
+    error subject "unusual type \"${SUBJECT_TYPE}\"" \
       --at 1 1 "${#SUBJECT_TYPE}" \
       --why 'the spec calls for a noun (§1); anything else confuses changelog tooling' \
       --fix "use one of: $(list_types)"
@@ -528,15 +564,15 @@ check_type() {
   if ! is_known_type "$lowercase"; then
     local suggestion
     suggestion="$(suggest_type "$lowercase")"
-    warning subject "unknown type \"${SUBJECT_TYPE}\"" \
+    error subject "unknown type \"${SUBJECT_TYPE}\"" \
       --at 1 1 "${#SUBJECT_TYPE}" \
-      --why "the spec allows any noun as a type (§1, §14); this repo's list is: $(list_types)" \
+      --why "the spec allows any noun (§1, §14); this repo keeps to a list so changelog tooling stays predictable: $(list_types)" \
       --fix "${suggestion:+did you mean \"${suggestion}\"? — }an unlisted type still commits, but changelog tooling ignores it"
 
   elif [[ $SUBJECT_TYPE != "$lowercase" ]]; then
-    warning subject "type \"${SUBJECT_TYPE}\" is not lowercase" \
+    error subject "type \"${SUBJECT_TYPE}\" is not lowercase" \
       --at 1 1 "${#SUBJECT_TYPE}" \
-      --why 'the spec forbids treating types as case-sensitive (§15); consistent casing is only a convention' \
+      --why 'the spec allows any casing (§15); this repo requires lowercase so history reads uniformly' \
       --fix "write \"${lowercase}\""
   fi
 }
@@ -555,16 +591,11 @@ check_scope() {
       --fix "drop the parentheses or fill them in, e.g. \"${SUBJECT_TYPE:-feat}(legal): ...\""
 
   elif [[ ! $SUBJECT_SCOPE =~ ^[a-z0-9]+([-_./,][a-z0-9]+)*$ ]]; then
-    warning subject "unusual scope \"${SUBJECT_SCOPE}\"" \
+    error subject "unusual scope \"${SUBJECT_SCOPE}\"" \
       --at 1 "$col" "${#SUBJECT_SCOPE}" \
-      --why 'the spec only asks for a noun in parentheses (§4); this repo keeps scopes lowercase' \
+      --why 'the spec only asks for a noun in parentheses (§4); this repo requires lowercase scopes' \
       --fix 'e.g. (auth), (api/routes), (legal.terms)'
 
-  elif [[ $SUBJECT_SCOPE =~ (ing|ed)$ || $SUBJECT_SCOPE =~ ^(add|fix|update|remove|refactor) ]]; then
-    warning subject "scope \"${SUBJECT_SCOPE}\" reads like a verb" \
-      --at 1 "$col" "${#SUBJECT_SCOPE}" \
-      --why 'a scope names a section of the codebase, not the action performed on it' \
-      --fix 'e.g. "feat(auth):" rather than "feat(adding-auth):"'
   fi
 }
 
@@ -574,23 +605,23 @@ check_description() {
   local desc="$SUBJECT_DESC" col="$SUBJECT_DESC_COL"
 
   if [[ $desc =~ ^[[:upper:]] ]]; then
-    warning subject 'description starts with a capital letter' \
+    error subject 'description starts with a capital letter' \
       --at 1 "$col" 1 \
-      --why 'the spec is case-insensitive here (§15); lowercase keeps changelog entries uniform' \
+      --why 'the spec is case-insensitive here (§15); this repo keeps descriptions lowercase for uniform changelogs' \
       --fix "write \"${desc,}\""
   fi
 
   if [[ $desc == *. ]]; then
-    warning subject 'description ends with a period' \
+    error subject 'description ends with a period' \
       --at 1 $((col + ${#desc} - 1)) 1 \
-      --why 'not a spec rule — the subject is a title, and a full stop reads oddly in a changelog list' \
+      --why 'not a spec rule; the subject is a title, and a full stop reads oddly in a changelog list' \
       --fix "write \"${desc%.}\""
   fi
 
   check_imperative_mood "$desc" "$col"
 
   if [[ ${desc,,} =~ (^|[^a-z])(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)[[:space:]]+#[0-9]+ ]]; then
-    warning subject 'issue reference in the subject line' \
+    error subject 'issue reference in the subject line' \
       --at 1 "$col" "${#desc}" \
       --why 'issue-closing keywords belong in a footer so the subject stays short and parseable' \
       --fix 'move it to a footer, e.g. "Closes #42"'
@@ -604,16 +635,11 @@ check_imperative_mood() {
   local lowercase="${first_word,,}"
 
   if [[ -n ${IMPERATIVE_FORM[$lowercase]-} ]]; then
-    warning subject "\"${lowercase}\" is not imperative mood" \
+    error subject "\"${lowercase}\" is not imperative mood" \
       --at 1 "$col" "${#first_word}" \
-      --why 'not a spec rule — git convention is an instruction: "add", not "added" or "adds"' \
+      --why 'not a spec rule; git convention is an instruction: "add", not "added" or "adds"' \
       --fix "write \"${IMPERATIVE_FORM[$lowercase]}${rest}\""
 
-  elif [[ $lowercase =~ (ing|ed)$ ]] && ((${#lowercase} > 5)); then
-    warning subject "\"${lowercase}\" may not be imperative mood" \
-      --at 1 "$col" "${#first_word}" \
-      --why 'the description should read as an instruction — "add", not "added" or "adding"' \
-      --fix 'use the bare verb stem if this is a past tense or gerund form'
   fi
 }
 
@@ -649,7 +675,7 @@ check_body_line_length() {
     # that merely mentions one does.
     [[ $(trim "$line") == *' '* ]] || continue
 
-    warning body "line $((idx + 1)) is ${#line} characters (max ${BODY_MAX})" \
+    error body "line $((idx + 1)) is ${#line} characters (max ${BODY_MAX})" \
       --at $((idx + 1)) $((BODY_MAX + 1)) $((${#line} - BODY_MAX)) \
       --why 'hard-wrapped bodies stay readable in terminals and in git log' \
       --fix "wrap the paragraph at ${BODY_MAX} columns"
@@ -680,9 +706,9 @@ check_trailing_whitespace() {
     location=body
     ((idx == 0)) && location=subject
 
-    warning "$location" 'trailing whitespace' \
+    error "$location" 'trailing whitespace' \
       --at $((idx + 1)) "$start" "$width" \
-      --why "git strips it under the default cleanup, but --cleanup=verbatim keeps it in the commit" \
+      --why "git strips it under the default cleanup, --cleanup=verbatim keeps it, and this repo rejects it either way" \
       --fix 'remove the whitespace at the end of the line'
   done
 }
@@ -795,7 +821,10 @@ check_footer_tokens() {
 
   has_well_formed_footer "$footer_start" || block_is_real=0
 
-  for ((idx = footer_start; idx < ${#LINES[@]}; idx++)); do
+  # Every paragraph, not just the last: "Reviewed by: Alice" two paragraphs up
+  # is the same spoiled trailer, and the footer block moving past it does not
+  # make it well formed.
+  for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
     line="${LINES[idx]}"
     # Breaking-change lines are check_breaking_change's business, whatever
     # case they are written in; reporting them twice helps nobody.
@@ -808,7 +837,9 @@ check_footer_tokens() {
     # sentence, unless the token is one we actually recognise. A novel token
     # written with spaces and no dashed neighbour cannot be told from a
     # sentence, so it goes unreported rather than taking every sentence with it.
-    ((block_is_real)) || is_known_footer_token "${token// /-}" || continue
+    if ((idx < footer_start)) || ((!block_is_real)); then
+      is_known_footer_token "${token// /-}" || continue
+    fi
 
     error footer "footer token \"${token}\" contains spaces" \
       --at $((idx + 1)) 1 "${#token}" \
@@ -838,12 +869,12 @@ check_footers_in_body() {
     # already there; sharing the last paragraph with prose is its own mistake,
     # and it costs the neighbouring trailers too.
     if ((idx >= footer_start)); then
-      warning footer "footer \"${token}\" shares a paragraph with body text" \
+      error footer "footer \"${token}\" shares a paragraph with body text" \
         --at $((idx + 1)) 1 "${#token}" \
         --why 'git drops a whole trailer block over one line that does not parse, taking this trailer with it' \
         --fix 'give the trailers a paragraph of their own, with no prose lines in it'
     else
-      warning footer "footer \"${token}\" sits inside the body" \
+      error footer "footer \"${token}\" sits inside the body" \
         --at $((idx + 1)) 1 "${#token}" \
         --why 'footers MUST start one blank line after the body, otherwise they are parsed as body text' \
         --fix 'move it to the footer block at the end of the message'
@@ -868,7 +899,7 @@ check_no_ai_attribution() {
     looks_like_footer "$line" || [[ $line == 🤖* ]] || continue
 
     if [[ $lowercase =~ ^co-authored-by:.*$agents ]] ||
-       [[ $lowercase =~ (generated[[:space:]]with|created[[:space:]]by).*$agents ]] ||
+       [[ $lowercase =~ (generated[[:space:]-]with|created[[:space:]-]by).*$agents ]] ||
        [[ $line == *🤖* ]]; then
       error footer 'AI agent attribution trailer' \
         --at $((idx + 1)) 1 "${#line}" \

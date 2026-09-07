@@ -56,6 +56,8 @@ jobs:
             local label="$2"
             if "$hook" "$1" >"$output" 2>&1; then
               printf '::notice::%s — ok\n' "$label"
+              # A pass can still have something to say; do not swallow it.
+              [ -s "$output" ] && cat "$output"
               return 0
             fi
             failures=$((failures + 1))
