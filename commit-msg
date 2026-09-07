@@ -394,7 +394,8 @@ check_subject() {
 # Leading whitespace is an error because git keeps it: its message cleanup
 # strips trailing whitespace and blank lines, never indentation, so an indented
 # type reaches the stored commit and defeats every parser reading it. Trailing
-# whitespace is only a warning — see check_trailing_whitespace.
+# whitespace is rejected too, for a different reason — see
+# check_trailing_whitespace.
 check_subject_indent() {
   local raw="$1"
 
@@ -469,7 +470,11 @@ parse_prefix() {
   # A trailing "!" is the breaking-change marker; one anywhere else is a typo.
   prefix="${prefix%!}"
   if [[ $prefix == *'!'* ]]; then
+    # Columns are measured against the subject as written, not the normalised
+    # copy this function works on, so the caret lands under what is displayed.
+    local before_bang="${SUBJECT_PREFIX%%!*}"
     error subject 'misplaced "!" breaking-change marker' \
+      --at 1 $((${#before_bang} + 1)) 1 \
       --why 'if included in the prefix, "!" MUST come immediately before the colon' \
       --fix 'write "type(scope)!: description"'
     prefix="${prefix//!/}"
@@ -490,20 +495,26 @@ split_type_and_scope() {
     # Deliberately the *first* ")": "feat(api)(ui)" must not look well formed.
     local trailing="${prefix#*)}"
     if [[ -n $trailing ]]; then
+      local through_paren="${SUBJECT_PREFIX%%)*}"
       error subject "unexpected \"${trailing}\" after the scope" \
+        --at 1 $((${#through_paren} + 2)) $((${#SUBJECT_PREFIX} - ${#through_paren} - 1)) \
         --why 'the prefix ends with the scope, an optional "!", then the colon' \
         --fix 'write "type(scope)!: description"'
     fi
 
   elif [[ $prefix == *'('* ]]; then
     SUBJECT_TYPE="${prefix%%(*}"
+    local before_paren="${SUBJECT_PREFIX%%(*}"
     error subject 'unclosed scope parenthesis' \
+      --at 1 $((${#before_paren} + 1)) $((${#SUBJECT_PREFIX} - ${#before_paren})) \
       --why 'a scope MUST be surrounded by parentheses, e.g. fix(parser):' \
       --fix "write \"${SUBJECT_TYPE}(${prefix#*(}): ...\""
 
   elif [[ $prefix == *')'* ]]; then
     SUBJECT_TYPE="${prefix%%)*}"
+    local before_close="${SUBJECT_PREFIX%%)*}"
     error subject 'scope closing parenthesis without an opening one' \
+      --at 1 $((${#before_close} + 1)) 1 \
       --why 'a scope MUST be surrounded by parentheses, e.g. fix(parser):' \
       --fix "write \"${SUBJECT_TYPE}(scope): ...\""
 
@@ -621,10 +632,10 @@ check_description() {
   check_imperative_mood "$desc" "$col"
 
   if [[ ${desc,,} =~ (^|[^a-z])(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)[[:space:]]+#[0-9]+ ]]; then
-    error subject 'issue reference in the subject line' \
+    error subject 'issue-closing keyword in the subject line' \
       --at 1 "$col" "${#desc}" \
-      --why 'issue-closing keywords belong in a footer so the subject stays short and parseable' \
-      --fix 'move it to a footer, e.g. "Closes #42"'
+      --why 'GitHub and GitLab read closing keywords from the footer, and the subject stays short without them' \
+      --fix 'move it to a footer, e.g. "Closes #42" — a plain "#42" reference in the subject is fine'
   fi
 }
 
@@ -682,10 +693,10 @@ check_body_line_length() {
   done
 }
 
-# Trailing whitespace persists only when a message is committed with
-# --cleanup=verbatim; git's default cleanup strips it from every line, and does
-# so after this hook has run. Worth pointing out, not worth refusing a commit
-# that git was about to tidy up by itself.
+# Trailing whitespace reaches the commit only under --cleanup=verbatim; git's
+# default cleanup strips it from every line, and does so after this hook has
+# run. Rejected either way, because this hook has no way to tell which mode is
+# in force and no warning severity to fall back on.
 check_trailing_whitespace() {
   local idx line stripped start width location
 
@@ -894,9 +905,13 @@ check_no_ai_attribution() {
     line="${LINES[idx]}"
     lowercase="${line,,}"
 
-    # A trailer, or the robot marker these tools sign off with. Prose that
-    # happens to name a tool is just prose.
-    looks_like_footer "$line" || [[ $line == 🤖* ]] || continue
+    # A trailer, the robot marker these tools sign off with, or a trailer
+    # written with spaces in the token — "Generated with: Copilot" is still an
+    # attribution, however malformed. Prose that names a tool is just prose.
+    looks_like_footer "$line" ||
+      [[ $line == 🤖* ]] ||
+      [[ $line =~ ^[A-Za-z][A-Za-z0-9]*([[:space:]]+[A-Za-z0-9]+)*:[[:space:]] ]] ||
+      continue
 
     if [[ $lowercase =~ ^co-authored-by:.*$agents ]] ||
        [[ $lowercase =~ (generated[[:space:]-]with|created[[:space:]-]by).*$agents ]] ||
