@@ -1,0 +1,780 @@
+#!/usr/bin/env bash
+#
+# commit-msg — Conventional Commits v1.0.0 validator
+# https://www.conventionalcommits.org/en/v1.0.0/
+#
+# Collects *every* violation in a single pass, then prints each one with the
+# offending text, the rule it breaks, and a concrete fix. Errors abort the
+# commit; warnings are printed but let it through.
+#
+# Enable:   git config core.hooksPath .githooks
+# Bypass:   git commit --no-verify
+#
+# Optional overrides (git config):
+#   commitMsg.types         space separated list of allowed types
+#   commitMsg.subjectMax    max subject length      (default 72)
+#   commitMsg.bodyMax       max body line length    (default 100)
+#
+set -uo pipefail
+
+readonly SPEC_URL='https://www.conventionalcommits.org/en/v1.0.0/'
+readonly DEFAULT_TYPES=(feat fix docs style refactor perf test build ci chore revert)
+
+# Footer tokens common enough that a match inside the body is worth flagging.
+readonly KNOWN_FOOTER_TOKENS=(
+  close closes closed fix fixes fixed resolve resolves resolved
+  ref refs reviewed-by acked-by signed-off-by co-authored-by
+)
+
+# Non-imperative first words we can rewrite with confidence: wrong form -> stem.
+declare -rA IMPERATIVE_FORM=(
+  [added]=add             [adds]=add             [adding]=add
+  [fixed]=fix             [fixes]=fix            [fixing]=fix
+  [updated]=update        [updates]=update       [updating]=update
+  [changed]=change        [changes]=change       [changing]=change
+  [removed]=remove        [removes]=remove       [removing]=remove
+  [deleted]=delete        [deletes]=delete       [deleting]=delete
+  [created]=create        [creates]=create       [creating]=create
+  [implemented]=implement [implements]=implement [implementing]=implement
+  [refactored]=refactor   [refactors]=refactor   [refactoring]=refactor
+  [renamed]=rename        [renames]=rename       [renaming]=rename
+  [moved]=move            [moves]=move           [moving]=move
+  [bumped]=bump           [bumps]=bump           [bumping]=bump
+  [improved]=improve      [improves]=improve     [improving]=improve
+  [migrated]=migrate      [migrates]=migrate     [migrating]=migrate
+  [introduced]=introduce  [introduces]=introduce [introducing]=introduce
+  [reverted]=revert       [reverts]=revert       [reverting]=revert
+  [upgraded]=upgrade      [upgrades]=upgrade     [upgrading]=upgrade
+  [pinned]=pin            [pins]=pin             [pinning]=pin
+  [allowed]=allow         [allows]=allow         [allowing]=allow
+  [prevented]=prevent     [prevents]=prevent     [preventing]=prevent
+  [supported]=support     [supports]=support     [supporting]=support
+  [enabled]=enable        [enables]=enable       [enabling]=enable
+  [disabled]=disable      [disables]=disable     [disabling]=disable
+  [dropped]=drop          [drops]=drop           [dropping]=drop
+  [replaced]=replace      [replaces]=replace     [replacing]=replace
+  [switched]=switch       [switches]=switch      [switching]=switch
+  [cleaned]=clean         [cleans]=clean         [cleaning]=clean
+  [handled]=handle        [handles]=handle       [handling]=handle
+  [made]=make             [makes]=make           [making]=make
+  [wrote]=write           [writes]=write         [writing]=write
+)
+
+# Runtime configuration, filled in by load_config.
+TYPES=()
+SUBJECT_MAX=72
+BODY_MAX=100
+
+# The cleaned-up commit message, one line per element, filled in by read_message.
+LINES=()
+
+# ============================================================== small helpers
+
+die() {
+  printf '%scommit-msg:%s %s\n' "${RED-}" "${OFF-}" "$1" >&2
+  exit 1
+}
+
+# Strip leading and trailing whitespace from $1.
+trim() {
+  local text="$1"
+  text="${text#"${text%%[![:space:]]*}"}"
+  text="${text%"${text##*[![:space:]]}"}"
+  printf '%s' "$text"
+}
+
+# "feat, fix, docs, ..." for use in messages.
+list_types() {
+  local joined='' type
+  for type in "${TYPES[@]}"; do
+    joined+="${joined:+, }${type}"
+  done
+  printf '%s' "$joined"
+}
+
+is_known_type() {
+  local candidate="$1" type
+  for type in "${TYPES[@]}"; do
+    [[ $type == "$candidate" ]] && return 0
+  done
+  return 1
+}
+
+is_known_footer_token() {
+  local candidate="${1,,}" token
+  for token in "${KNOWN_FOOTER_TOKENS[@]}"; do
+    [[ $token == "$candidate" ]] && return 0
+  done
+  return 1
+}
+
+# Cheapest useful "did you mean": prefix overlap first, then a shared 2-char stem.
+suggest_type() {
+  local given="${1,,}" type
+  for type in "${TYPES[@]}"; do
+    [[ $type == "$given"* || $given == "$type"* ]] && { printf '%s' "$type"; return; }
+  done
+  for type in "${TYPES[@]}"; do
+    [[ ${type:0:2} == "${given:0:2}" ]] && { printf '%s' "$type"; return; }
+  done
+}
+
+# ==================================================================== set-up
+
+load_config() {
+  local configured
+
+  configured="$(git config --get commitMsg.types || true)"
+  if [[ -n $configured ]]; then
+    read -r -a TYPES <<<"$configured"
+  else
+    TYPES=("${DEFAULT_TYPES[@]}")
+  fi
+
+  configured="$(git config --get commitMsg.subjectMax || true)"
+  [[ $configured =~ ^[0-9]+$ ]] && SUBJECT_MAX="$configured"
+
+  configured="$(git config --get commitMsg.bodyMax || true)"
+  [[ $configured =~ ^[0-9]+$ ]] && BODY_MAX="$configured"
+
+  return 0
+}
+
+setup_colours() {
+  if [[ -t 2 && -z ${NO_COLOR-} && ${TERM:-dumb} != dumb ]]; then
+    BOLD=$'\033[1m' DIM=$'\033[2m' RED=$'\033[31m'
+    YELLOW=$'\033[33m' GREEN=$'\033[32m' CYAN=$'\033[36m' OFF=$'\033[0m'
+  else
+    BOLD='' DIM='' RED='' YELLOW='' GREEN='' CYAN='' OFF=''
+  fi
+}
+
+# Mirror git's own cleanup so we validate what git will actually store: drop the
+# verbose diff below the scissors line, drop comments, normalise CRLF, then trim
+# blank lines from both ends.
+read_message() {
+  local msg_file="$1" cleaned
+
+  cleaned="$(sed -e '/^# *-\{2,\} >8 -\{2,\}/,$d' -e 's/\r$//' -e '/^#/d' "$msg_file")"
+  cleaned="$(printf '%s\n' "$cleaned" | sed -e '/./,$!d' | tac | sed -e '/./,$!d' | tac)"
+
+  mapfile -t LINES <<<"$cleaned"
+  # mapfile on an empty string still yields one empty line.
+  ((${#LINES[@]} == 1 && ${#LINES[0]} == 0)) && LINES=()
+
+  return 0
+}
+
+# Merge commits and autosquash markers are written by git, not by the author.
+is_generated_by_git() {
+  case "$1" in
+    Merge\ *|fixup!*|squash!*|amend!*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# ================================================================== findings
+
+readonly FIELD_SEP=$'\x1f'
+FINDINGS=()
+ERROR_COUNT=0
+WARNING_COUNT=0
+
+# add_finding <severity> <location> <summary> [--at <line> <col> <width>]
+#             [--why <text>] [--fix <text>]
+#
+# --at anchors the finding to a message line and underlines <width> characters
+# from <col> (both 1-based) when the report is printed.
+add_finding() {
+  local severity="$1" location="$2" summary="$3"
+  shift 3
+
+  local line=0 col=0 width=0 why='' fix=''
+  while (($#)); do
+    case "$1" in
+      --at)  line="$2" col="$3" width="$4"; shift 4 ;;
+      --why) why="$2"; shift 2 ;;
+      --fix) fix="$2"; shift 2 ;;
+      *)     die "internal: unknown add_finding option '$1'" ;;
+    esac
+  done
+
+  FINDINGS+=("${severity}${FIELD_SEP}${location}${FIELD_SEP}${summary}${FIELD_SEP}${line}${FIELD_SEP}${col}${FIELD_SEP}${width}${FIELD_SEP}${why}${FIELD_SEP}${fix}")
+
+  if [[ $severity == error ]]; then
+    ERROR_COUNT=$((ERROR_COUNT + 1))
+  else
+    WARNING_COUNT=$((WARNING_COUNT + 1))
+  fi
+
+  return 0
+}
+
+error()   { add_finding error "$@"; }
+warning() { add_finding warning "$@"; }
+
+# ============================================================ subject checks
+
+# Filled in by split_subject / parse_prefix / parse_description.
+SUBJECT_PREFIX=''     # everything before the first colon, exactly as written
+SUBJECT_REMAINDER=''  # everything after it, leading space included
+SUBJECT_TYPE=''
+SUBJECT_SCOPE=''
+SUBJECT_HAS_SCOPE=0
+SUBJECT_DESC=''
+SUBJECT_DESC_COL=0    # column of the first description character, 1-based
+
+check_subject() {
+  local raw="${LINES[0]}"
+
+  check_subject_whitespace "$raw"
+  check_subject_length "$(trim "$raw")"
+
+  # A raw `git revert` subject gets one targeted finding; parsing it further
+  # would only produce noise about the quoted subject it carries.
+  if [[ $raw == Revert\ \"* ]]; then
+    report_generated_revert "$raw"
+    return 0
+  fi
+
+  local subject
+  subject="$(trim "$raw")"
+
+  if [[ $subject != *:* ]]; then
+    report_missing_separator "$subject"
+    return 0
+  fi
+
+  split_subject "$subject"
+  parse_prefix
+  check_type
+  check_scope
+  parse_description
+  check_description
+
+  return 0
+}
+
+check_subject_whitespace() {
+  local raw="$1"
+
+  if [[ $raw =~ ^[[:space:]] ]]; then
+    error subject 'leading whitespace before the type' \
+      --at 1 1 1 \
+      --why 'the type MUST be the first character of the commit message' \
+      --fix 'remove the indentation'
+  fi
+
+  if [[ $raw =~ [[:space:]]$ ]]; then
+    error subject 'trailing whitespace' \
+      --at 1 "${#raw}" 1 \
+      --why 'trailing whitespace breaks changelog parsers and shows up as noise in git log' \
+      --fix 'strip the whitespace at the end of the subject'
+  fi
+}
+
+check_subject_length() {
+  local subject="$1"
+  ((${#subject} > SUBJECT_MAX)) || return 0
+
+  error subject "subject is ${#subject} characters (max ${SUBJECT_MAX})" \
+    --at 1 $((SUBJECT_MAX + 1)) $((${#subject} - SUBJECT_MAX)) \
+    --why 'longer subjects are silently truncated in git log and in the GitHub/GitLab UI' \
+    --fix 'shorten the description and move the detail into the body'
+}
+
+report_generated_revert() {
+  local reverted="${1#Revert \"}"
+  reverted="${reverted%\"}"
+
+  error subject 'git-generated revert subject is not a conventional commit' \
+    --at 1 1 6 \
+    --why 'a revert MUST also carry a type; the spec recommends the revert type plus a Refs footer' \
+    --fix "rewrite as \"revert: ${reverted}\" and keep \"Refs: <sha>\" in the footer"
+}
+
+report_missing_separator() {
+  local subject="$1"
+
+  # Offer the same text as a conformant subject: lowercase start, no full stop.
+  local suggestion="${subject%.}"
+  suggestion="${suggestion,}"
+
+  error subject 'missing the ": " separator' \
+    --at 1 1 "${#subject}" \
+    --why 'the format is <type>[optional scope][!]: <description> — the colon and space are REQUIRED' \
+    --fix "prefix it with a type, e.g. \"feat: ${suggestion:-add community page}\""
+}
+
+# Split "type(scope)!: description" at the first colon.
+split_subject() {
+  local subject="$1"
+
+  SUBJECT_PREFIX="${subject%%:*}"
+  SUBJECT_REMAINDER="${subject#*:}"
+
+  SUBJECT_DESC_COL=$((${#SUBJECT_PREFIX} + 2))
+  [[ $SUBJECT_REMAINDER == " "* ]] && SUBJECT_DESC_COL=$((SUBJECT_DESC_COL + 1))
+
+  return 0
+}
+
+# Report anything malformed in the "type(scope)!" prefix, then hand the
+# normalised form to split_type_and_scope.
+parse_prefix() {
+  local prefix="$SUBJECT_PREFIX"
+
+  if [[ $prefix =~ [[:space:]] ]]; then
+    local before_space="${prefix%%[[:space:]]*}"
+    error subject 'whitespace inside the type/scope prefix' \
+      --at 1 $((${#before_space} + 1)) 1 \
+      --why 'nothing may sit between the type, the scope, the "!" and the colon' \
+      --fix 'write "type(scope)!: description" with no spaces before the colon'
+    prefix="${prefix//[[:space:]]/}"
+  fi
+
+  # A trailing "!" is the breaking-change marker; one anywhere else is a typo.
+  prefix="${prefix%!}"
+  if [[ $prefix == *'!'* ]]; then
+    error subject 'misplaced "!" breaking-change marker' \
+      --why 'if included in the prefix, "!" MUST come immediately before the colon' \
+      --fix 'write "type(scope)!: description"'
+    prefix="${prefix//!/}"
+  fi
+
+  split_type_and_scope "$prefix"
+}
+
+split_type_and_scope() {
+  local prefix="$1"
+
+  if [[ $prefix == *'('*')'* ]]; then
+    SUBJECT_HAS_SCOPE=1
+    SUBJECT_TYPE="${prefix%%(*}"
+    SUBJECT_SCOPE="${prefix#*(}"
+    SUBJECT_SCOPE="${SUBJECT_SCOPE%%)*}"
+
+    local trailing="${prefix##*)}"
+    if [[ -n $trailing ]]; then
+      error subject "unexpected \"${trailing}\" after the scope" \
+        --why 'the prefix ends with the scope, an optional "!", then the colon' \
+        --fix 'write "type(scope)!: description"'
+    fi
+
+  elif [[ $prefix == *'('* ]]; then
+    SUBJECT_TYPE="${prefix%%(*}"
+    error subject 'unclosed scope parenthesis' \
+      --why 'a scope MUST be surrounded by parentheses, e.g. fix(parser):' \
+      --fix "write \"${SUBJECT_TYPE}(${prefix#*(}): ...\""
+
+  elif [[ $prefix == *')'* ]]; then
+    SUBJECT_TYPE="${prefix%%)*}"
+    error subject 'scope closing parenthesis without an opening one' \
+      --why 'a scope MUST be surrounded by parentheses, e.g. fix(parser):' \
+      --fix "write \"${SUBJECT_TYPE}(scope): ...\""
+
+  else
+    SUBJECT_TYPE="$prefix"
+  fi
+}
+
+# Check the ": " separator itself and keep the description it introduces.
+parse_description() {
+  local prefix="$SUBJECT_PREFIX" remainder="$SUBJECT_REMAINDER"
+  local separator_col=$((${#prefix} + 2))
+
+  if [[ -z $remainder ]]; then
+    error subject 'missing description' \
+      --at 1 "$separator_col" 1 \
+      --why 'a description MUST immediately follow the colon and space' \
+      --fix "e.g. \"${prefix}: add community favicon\""
+
+  elif [[ $remainder != " "* ]]; then
+    SUBJECT_DESC="$remainder"
+    error subject 'missing space after the colon' \
+      --at 1 "$separator_col" 1 \
+      --why 'the separator is exactly ": " — colon followed by one space' \
+      --fix "write \"${prefix}: ${remainder}\""
+
+  elif [[ $remainder == "  "* ]]; then
+    SUBJECT_DESC="$(trim "$remainder")"
+    error subject 'more than one space after the colon' \
+      --at 1 "$separator_col" 3 \
+      --why 'the separator is exactly ": " — colon followed by one space' \
+      --fix "write \"${prefix}: ${SUBJECT_DESC}\""
+
+  else
+    SUBJECT_DESC="${remainder# }"
+  fi
+}
+
+check_type() {
+  if [[ -z $SUBJECT_TYPE ]]; then
+    error subject 'missing type' \
+      --at 1 1 1 \
+      --why 'commits MUST be prefixed with a type — a noun such as feat or fix' \
+      --fix "start the subject with one of: $(list_types)"
+    return 0
+  fi
+
+  if [[ ! $SUBJECT_TYPE =~ ^[A-Za-z]+$ ]]; then
+    error subject "invalid type \"${SUBJECT_TYPE}\"" \
+      --at 1 1 "${#SUBJECT_TYPE}" \
+      --why 'a type is a single lowercase word (letters only)' \
+      --fix "use one of: $(list_types)"
+    return 0
+  fi
+
+  local lowercase="${SUBJECT_TYPE,,}"
+
+  if ! is_known_type "$lowercase"; then
+    local suggestion
+    suggestion="$(suggest_type "$lowercase")"
+    error subject "unknown type \"${SUBJECT_TYPE}\"" \
+      --at 1 1 "${#SUBJECT_TYPE}" \
+      --why "allowed types: $(list_types)" \
+      --fix "${suggestion:+did you mean \"${suggestion}\"? — }commits with an unlisted type are skipped by changelog tooling"
+
+  elif [[ $SUBJECT_TYPE != "$lowercase" ]]; then
+    error subject "type \"${SUBJECT_TYPE}\" is not lowercase" \
+      --at 1 1 "${#SUBJECT_TYPE}" \
+      --why 'the spec is case-insensitive but a single casing MUST be used consistently — this repo uses lowercase' \
+      --fix "write \"${lowercase}\""
+  fi
+}
+
+check_scope() {
+  ((SUBJECT_HAS_SCOPE)) || return 0
+
+  local col=$((${#SUBJECT_TYPE} + 2))
+
+  if [[ -z $SUBJECT_SCOPE ]]; then
+    error subject 'empty scope "()"' \
+      --at 1 "$col" 2 \
+      --why 'a scope MUST be a noun describing a section of the codebase' \
+      --fix "drop the parentheses or fill them in, e.g. \"${SUBJECT_TYPE:-feat}(legal): ...\""
+
+  elif [[ ! $SUBJECT_SCOPE =~ ^[a-z0-9]+([-_./,][a-z0-9]+)*$ ]]; then
+    error subject "invalid scope \"${SUBJECT_SCOPE}\"" \
+      --at 1 "$col" "${#SUBJECT_SCOPE}" \
+      --why 'a scope is a lowercase noun; separate words with - . _ / and multiple scopes with ,' \
+      --fix 'e.g. (auth), (api/routes), (legal.terms)'
+
+  elif [[ $SUBJECT_SCOPE =~ (ing|ed)$ || $SUBJECT_SCOPE =~ ^(add|fix|update|remove|refactor) ]]; then
+    warning subject "scope \"${SUBJECT_SCOPE}\" reads like a verb" \
+      --at 1 "$col" "${#SUBJECT_SCOPE}" \
+      --why 'a scope names a section of the codebase, not the action performed on it' \
+      --fix 'e.g. "feat(auth):" rather than "feat(adding-auth):"'
+  fi
+}
+
+check_description() {
+  [[ -n $SUBJECT_DESC ]] || return 0
+
+  local desc="$SUBJECT_DESC" col="$SUBJECT_DESC_COL"
+
+  if [[ $desc =~ ^[[:upper:]] ]]; then
+    error subject 'description starts with a capital letter' \
+      --at 1 "$col" 1 \
+      --why 'descriptions stay lowercase so generated changelog entries read uniformly' \
+      --fix "write \"${desc,}\""
+  fi
+
+  if [[ $desc == *. ]]; then
+    error subject 'description ends with a period' \
+      --at 1 $((col + ${#desc} - 1)) 1 \
+      --why 'the subject is a title, not a sentence — trailing punctuation breaks changelog formatting' \
+      --fix "write \"${desc%.}\""
+  fi
+
+  check_imperative_mood "$desc" "$col"
+
+  if [[ $desc =~ (^|[^a-z])(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)[[:space:]]+#[0-9]+ ]]; then
+    warning subject 'issue reference in the subject line' \
+      --at 1 "$col" "${#desc}" \
+      --why 'issue-closing keywords belong in a footer so the subject stays short and parseable' \
+      --fix 'move it to a footer, e.g. "Closes #42"'
+  fi
+}
+
+check_imperative_mood() {
+  local desc="$1" col="$2"
+  local first_word="${desc%%[ ,:;]*}"
+  local rest="${desc#"$first_word"}"
+  local lowercase="${first_word,,}"
+
+  if [[ -n ${IMPERATIVE_FORM[$lowercase]-} ]]; then
+    error subject "\"${lowercase}\" is not imperative mood" \
+      --at 1 "$col" "${#first_word}" \
+      --why 'the description reads as an instruction — "add", not "added" or "adds"' \
+      --fix "write \"${IMPERATIVE_FORM[$lowercase]}${rest}\""
+
+  elif [[ $lowercase =~ (ing|ed)$ ]] && ((${#lowercase} > 5)); then
+    warning subject "\"${lowercase}\" may not be imperative mood" \
+      --at 1 "$col" "${#first_word}" \
+      --why 'the description should read as an instruction — "add", not "added" or "adding"' \
+      --fix 'use the bare verb stem if this is a past tense or gerund form'
+  fi
+}
+
+# =============================================================== body checks
+
+check_body() {
+  ((${#LINES[@]} > 1)) || return 0
+
+  if [[ -n ${LINES[1]} ]]; then
+    error body 'no blank line after the subject' \
+      --at 2 1 "${#LINES[1]}" \
+      --why 'the body MUST begin one blank line after the description — parsers split the header there' \
+      --fix 'insert an empty line between the subject and the body'
+  fi
+
+  check_body_line_length
+}
+
+check_body_line_length() {
+  local idx line in_code_fence=0
+
+  for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
+    line="${LINES[idx]}"
+
+    if [[ $line == '```'* ]]; then
+      in_code_fence=$((1 - in_code_fence))
+      continue
+    fi
+    ((in_code_fence)) && continue
+
+    # Unbreakable lines (a lone URL, a table row) are left alone.
+    ((${#line} > BODY_MAX)) || continue
+    [[ $line == *' '* && $line != *http* ]] || continue
+
+    warning body "line $((idx + 1)) is ${#line} characters (max ${BODY_MAX})" \
+      --at $((idx + 1)) $((BODY_MAX + 1)) $((${#line} - BODY_MAX)) \
+      --why 'hard-wrapped bodies stay readable in terminals and in git log' \
+      --fix "wrap the paragraph at ${BODY_MAX} columns"
+  done
+}
+
+# ============================================================= footer checks
+
+check_footers() {
+  ((${#LINES[@]} > 1)) || return 0
+
+  # The footer block is everything after the last blank line. With no blank line
+  # at all, every line after the subject is a footer candidate.
+  local idx footer_start=1
+  for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
+    [[ -z ${LINES[idx]} ]] && footer_start=$((idx + 1))
+  done
+
+  check_breaking_change
+  check_footer_tokens "$footer_start"
+  check_footers_in_body "$footer_start"
+  check_no_ai_attribution
+}
+
+check_breaking_change() {
+  local idx line lowercase token line_no
+
+  for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
+    line="${LINES[idx]}"
+    lowercase="${line,,}"
+    [[ $lowercase == 'breaking change'* || $lowercase == 'breaking-change'* ]] || continue
+
+    line_no=$((idx + 1))
+    token="${line%%:*}"
+
+    if [[ $line != 'BREAKING CHANGE'* && $line != 'BREAKING-CHANGE'* ]]; then
+      error footer "\"${token}\" must be uppercase" \
+        --at "$line_no" 1 "${#token}" \
+        --why 'BREAKING CHANGE is the one token the spec treats as case-sensitive; BREAKING-CHANGE is a synonym' \
+        --fix 'write "BREAKING CHANGE: <description>"'
+
+    elif [[ ! $line =~ ^BREAKING[[:space:]-]CHANGE:[[:space:]].+ ]]; then
+      error footer 'BREAKING CHANGE footer has no description' \
+        --at "$line_no" 1 "${#line}" \
+        --why 'the token MUST be followed by a colon, a space and a description' \
+        --fix 'write "BREAKING CHANGE: environment variables now take precedence over config files"'
+    fi
+
+    if ((idx > 1)) && [[ -n ${LINES[idx - 1]} ]]; then
+      error footer 'BREAKING CHANGE footer is not preceded by a blank line' \
+        --at "$line_no" 1 "${#token}" \
+        --why 'footers MUST start one blank line after the body' \
+        --fix 'insert an empty line before the footer block'
+    fi
+  done
+}
+
+# A footer token uses "-" where a sentence would use a space — that is what
+# tells a parser "Reviewed-by: Z" apart from a body paragraph.
+check_footer_tokens() {
+  local footer_start="$1" idx line token
+
+  for ((idx = footer_start; idx < ${#LINES[@]}; idx++)); do
+    line="${LINES[idx]}"
+    [[ $line == 'BREAKING CHANGE'* ]] && continue
+    [[ $line =~ ^([A-Za-z][A-Za-z0-9]*([[:space:]]+[A-Za-z0-9]+)+)(:[[:space:]]|[[:space:]]#) ]] || continue
+
+    token="${BASH_REMATCH[1]}"
+    error footer "footer token \"${token}\" contains spaces" \
+      --at $((idx + 1)) 1 "${#token}" \
+      --why 'a footer token MUST use - in place of whitespace, e.g. Acked-by — that is what separates a footer from a multi-paragraph body' \
+      --fix "write \"${token// /-}: ...\""
+  done
+}
+
+# A footer-looking line glued to the body is read as body text by parsers.
+check_footers_in_body() {
+  local footer_start="$1" idx line token
+
+  for ((idx = 2; idx < footer_start; idx++)); do
+    line="${LINES[idx]}"
+    [[ -n ${LINES[idx - 1]} ]] || continue
+    [[ $line =~ ^([A-Za-z][A-Za-z0-9-]*)(:[[:space:]]|[[:space:]]#) ]] || continue
+
+    token="${BASH_REMATCH[1]}"
+    is_known_footer_token "$token" || continue
+
+    warning footer "footer \"${token}\" sits inside the body" \
+      --at $((idx + 1)) 1 "${#token}" \
+      --why 'footers MUST start one blank line after the body, otherwise they are parsed as body text' \
+      --fix 'move it to the footer block at the end of the message'
+  done
+}
+
+# This repo attributes commits to their human author only.
+check_no_ai_attribution() {
+  local agents='(claude|anthropic|copilot|chatgpt|gpt-|cursor|codex|bot@)'
+  local idx line lowercase
+
+  for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
+    line="${LINES[idx]}"
+    lowercase="${line,,}"
+
+    if [[ $lowercase =~ ^co-authored-by:.*$agents ]] ||
+       [[ $lowercase =~ (generated[[:space:]]with|created[[:space:]]by).*$agents ]] ||
+       [[ $line == *🤖* ]]; then
+      error footer 'AI agent attribution trailer' \
+        --at $((idx + 1)) 1 "${#line}" \
+        --why 'commits in this repo are attributed to their human author only' \
+        --fix 'delete this line'
+    fi
+  done
+}
+
+# ================================================================= reporting
+
+report() {
+  local msg_file="$1"
+
+  if ((ERROR_COUNT == 0 && WARNING_COUNT == 0)); then
+    exit 0
+  fi
+
+  print_heading
+  print_message
+
+  if ((ERROR_COUNT)); then
+    printf '\n%s%s %d error(s)%s\n' "$BOLD" "$RED" "$ERROR_COUNT" "$OFF" >&2
+    print_findings error '✗' "$RED"
+  fi
+  if ((WARNING_COUNT)); then
+    printf '\n%s%s %d warning(s)%s\n' "$BOLD" "$YELLOW" "$WARNING_COUNT" "$OFF" >&2
+    print_findings warning '!' "$YELLOW"
+  fi
+
+  print_reference
+
+  if ((ERROR_COUNT)); then
+    printf '\n%scommit aborted.%s your message is kept in %s — fix it and commit again%s\n\n' \
+      "$RED" "$OFF" "$msg_file" "${DIM}, or bypass with --no-verify${OFF}" >&2
+    exit 1
+  fi
+
+  printf '\n%s✓ commit accepted%s %s(warnings only)%s\n\n' "$GREEN" "$OFF" "$DIM" "$OFF" >&2
+  exit 0
+}
+
+print_heading() {
+  local marker='!'
+  ((ERROR_COUNT)) && marker='✗'
+
+  printf '\n%s%s Conventional Commits check%s %s(v1.0.0)%s\n' \
+    "$BOLD" "$marker" "$OFF" "$DIM" "$OFF" >&2
+}
+
+print_message() {
+  local idx
+
+  printf '\n  %scommit message%s\n' "$DIM" "$OFF" >&2
+  for ((idx = 0; idx < ${#LINES[@]}; idx++)); do
+    printf '     %s%2d │%s %s\n' "$DIM" $((idx + 1)) "$OFF" "${LINES[idx]}" >&2
+  done
+}
+
+print_findings() {
+  local wanted="$1" marker="$2" colour="$3"
+  local record severity location summary line col width why fix
+
+  for record in "${FINDINGS[@]}"; do
+    IFS="$FIELD_SEP" read -r severity location summary line col width why fix <<<"$record"
+    [[ $severity == "$wanted" ]] || continue
+
+    printf '\n  %s%s%s %s%s%s %s·%s %s\n' \
+      "$colour" "$marker" "$OFF" "$BOLD" "$location" "$OFF" "$DIM" "$OFF" "$summary" >&2
+    print_quoted_line "$line" "$col" "$width"
+    printf '     %swhy%s  %s\n' "$DIM" "$OFF" "$why" >&2
+    printf '     %sfix%s  %s\n' "$CYAN" "$OFF" "$fix" >&2
+  done
+}
+
+# Echo message line <line>, with <width> carets under column <col>.
+print_quoted_line() {
+  local line="$1" col="$2" width="$3"
+
+  ((line > 0 && line <= ${#LINES[@]})) || return 0
+  local text="${LINES[line - 1]}"
+  printf '     %s│%s %s\n' "$DIM" "$OFF" "$text" >&2
+
+  ((col > 0 && width > 0)) || return 0
+  ((width > ${#text})) && width=${#text}
+  ((width > 0)) || width=1
+
+  local indent='' carets=''
+  ((col > 1)) && printf -v indent '%*s' $((col - 1)) ''
+  printf -v carets '%*s' "$width" ''
+
+  printf '     %s│%s %s%s%s%s\n' \
+    "$DIM" "$OFF" "$indent" "$RED" "${carets// /^}" "$OFF" >&2
+}
+
+print_reference() {
+  printf '\n  %sformat%s  <type>[optional scope][!]: <description>\n' "$DIM" "$OFF" >&2
+  printf '          %s <blank line> <body>   <blank line> <footers>%s\n' "$DIM" "$OFF" >&2
+  printf '  %stypes%s   %s\n' "$DIM" "$OFF" "$(list_types)" >&2
+  printf '  %sspec%s    %s\n' "$DIM" "$OFF" "$SPEC_URL" >&2
+}
+
+# ====================================================================== main
+
+main() {
+  setup_colours
+
+  local msg_file="${1-}"
+  [[ -n $msg_file && -f $msg_file ]] || die 'expected the commit message file as $1'
+
+  load_config
+  read_message "$msg_file"
+
+  ((${#LINES[@]})) || die 'the commit message is empty — aborting.'
+  is_generated_by_git "${LINES[0]}" && exit 0
+
+  check_subject
+  check_body
+  check_footers
+
+  report "$msg_file"
+}
+
+main "$@"
