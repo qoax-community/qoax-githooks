@@ -105,8 +105,7 @@ declare -rA IMPERATIVE_FORM=(
 TYPES=()
 SUBJECT_MAX=72
 BODY_MAX=100
-COMMENT_CHAR='#'
-STRIP_COMMENTS=1
+CLEANUP_MODE=default
 
 # The cleaned-up commit message, one line per element, filled in by read_message.
 LINES=()
@@ -190,22 +189,12 @@ load_config() {
   configured="$(git config --get commitMsg.bodyMax || true)"
   [[ $configured =~ ^[0-9]+$ ]] && BODY_MAX=$((10#$configured))
 
-  # Comments are whatever core.commentChar says they are, not always "#".
-  configured="$(git config --get core.commentChar || true)"
-  case "$configured" in
-    '') COMMENT_CHAR='#' ;;
-    auto) COMMENT_CHAR=auto ;;
-    ?) COMMENT_CHAR="$configured" ;;
-    *) COMMENT_CHAR='#' ;;
-  esac
-
-  # Only the strip mode removes comments. whitespace — which is what a -m
-  # message gets — keeps them, and so does verbatim, so a "#" line there is
-  # content that git will store, not a comment to drop.
+  # Which cleanup git will apply decides what counts as a comment, and whether
+  # blank lines and trailing whitespace survive into the commit.
   configured="$(git config --get commit.cleanup || true)"
   case "$configured" in
-    whitespace|verbatim|scissors) STRIP_COMMENTS=0 ;;
-    *) STRIP_COMMENTS=1 ;;
+    verbatim|whitespace|scissors|strip) CLEANUP_MODE="$configured" ;;
+    *) CLEANUP_MODE=default ;;
   esac
 
   return 0
@@ -220,79 +209,67 @@ setup_colours() {
   fi
 }
 
-# Mirror git's own cleanup so we validate what git will actually store: ignore
-# everything below the verbose-diff scissors line, drop comments, normalise
-# CRLF, then trim blank lines from both ends. Kept free of sed/tac so the hook
-# does not depend on GNU coreutils.
+# Validate what git will actually store. Rather than reimplement its cleanup,
+# run the message through git's own: that is what decides whether a "#" line is
+# a comment (core.commentChar, including "auto", which a hook cannot resolve by
+# itself) and whether blank lines and trailing whitespace survive.
 read_message() {
-  local msg_file="$1" line marker
-  local -a raw=() kept=()
+  local msg_file="$1" line first_raw
+  local -a raw=() body=()
 
   while IFS= read -r line || [[ -n $line ]]; do
     raw+=("${line%$'\r'}")
   done <"$msg_file"
 
-  marker="$(resolve_comment_char ${raw[@]+"${raw[@]}"})"
-
+  # Everything below the scissors line is the verbose diff, whatever marker
+  # git wrote it with.
   for line in ${raw[@]+"${raw[@]}"}; do
-    # Everything from the scissors line down is the verbose diff, not message.
-    [[ $line == "$marker"* && $line == *'>8'* && $line == *--* ]] && break
-    ((STRIP_COMMENTS)) && [[ $line == "$marker"* ]] && continue
-    kept+=("$line")
+    [[ $line =~ ^[^[:alnum:][:space:]][[:space:]]*-{2,}[[:space:]]*\>8[[:space:]]*-{2,} ]] && break
+    body+=("$line")
   done
-
-  # With commit.cleanup unset git decides by whether it opened an editor, which
-  # a hook cannot see: comments are dropped for an edited message and kept for
-  # "git commit -m". Stripping is the right guess for the editor, but it would
-  # hide a comment standing where the subject belongs, so say so instead.
-  SUBJECT_MAY_BE_COMMENT=0
-  if ((STRIP_COMMENTS)) && ((${#kept[@]})); then
-    for line in ${raw[@]+"${raw[@]}"}; do
-      is_blank "$line" && continue
-      [[ $line == "$marker"* ]] && SUBJECT_MAY_BE_COMMENT=1
-      break
-    done
-  fi
-
-  local first=0 last=$((${#kept[@]} - 1))
-  while ((first <= last)) && is_blank "${kept[first]}"; do first=$((first + 1)); done
-  while ((last >= first)) && is_blank "${kept[last]}"; do last=$((last - 1)); done
 
   LINES=()
-  ((first <= last)) && LINES=("${kept[@]:first:last - first + 1}")
-
-  return 0
-}
-
-# core.commentChar=auto makes git pick the first candidate character that no
-# line already starts with, so mirror that choice instead of assuming "#".
-# Takes the message lines as arguments.
-resolve_comment_char() {
-  local candidates='#;@!$%^&|:' candidate line idx used
-
-  if [[ $COMMENT_CHAR != auto ]]; then
-    printf '%s' "$COMMENT_CHAR"
-    return 0
+  if ((${#body[@]})); then
+    case "$CLEANUP_MODE" in
+      verbatim)
+        # Nothing is cleaned, not even the blank lines around the message.
+        mapfile -t LINES < <(printf '%s\n' "${body[@]}")
+        ;;
+      whitespace|scissors)
+        mapfile -t LINES < <(printf '%s\n' "${body[@]}" | git stripspace)
+        ;;
+      *)
+        mapfile -t LINES < <(printf '%s\n' "${body[@]}" | git stripspace --strip-comments)
+        ;;
+    esac
   fi
 
-  for ((idx = 0; idx < ${#candidates}; idx++)); do
-    candidate="${candidates:idx:1}"
-    used=0
-    for line in "$@"; do
-      [[ $line == "$candidate"* ]] && { used=1; break; }
+  # With commit.cleanup unset git decides by whether it opened an editor, which
+  # a hook cannot see: comments go for an edited message and stay for "git
+  # commit -m". Stripping is the right guess for the editor, but it must not
+  # quietly drop a line that would otherwise be the subject.
+  SUBJECT_MAY_BE_COMMENT=0
+  if [[ $CLEANUP_MODE == default ]] && ((${#LINES[@]})); then
+    first_raw=''
+    for line in ${body[@]+"${body[@]}"}; do
+      is_blank "$line" && continue
+      first_raw="$line"
+      break
     done
-    ((used)) || { printf '%s' "$candidate"; return 0; }
-  done
+    [[ -n $first_raw && "$(trim "$first_raw")" != "$(trim "${LINES[0]}")" ]] &&
+      SUBJECT_MAY_BE_COMMENT=1
+  fi
 
-  printf '#'
+  return 0
 }
 
 # Autosquash markers are written by git. So is a merge subject — but only
 # during an actual merge; "Merge the two config files" typed by hand is an
 # ordinary commit and gets checked like any other.
 is_generated_by_git() {
+  # The space is git's own: "fixup!nonsense" is somebody's commit, not a marker.
   case "$1" in
-    fixup!*|squash!*|amend!*) return 0 ;;
+    'fixup! '*|'squash! '*|'amend! '*) return 0 ;;
   esac
 
   [[ $1 == Merge\ * ]] || return 1
@@ -359,8 +336,8 @@ check_subject() {
   if ((SUBJECT_MAY_BE_COMMENT)); then
     error subject 'a comment line stands where the subject belongs' \
       --at 1 1 "${#raw}" \
-      --why "git keeps ${COMMENT_CHAR} lines for \"git commit -m\" and drops them for an edited message, so this either is the subject or hides it" \
-      --fix "remove the ${COMMENT_CHAR} line above the subject, or move your subject above it"
+      --why 'git keeps comment lines for "git commit -m" and drops them for an edited message, so this either is the subject or hides it' \
+      --fix 'remove the comment line above the subject, or move your subject above it'
   fi
 
   check_subject_indent "$raw"
@@ -541,11 +518,11 @@ parse_description() {
       --why 'the separator is exactly ": " — colon followed by one space' \
       --fix "write \"${prefix}: ${remainder}\""
 
-  elif [[ $remainder == "  "* ]]; then
+  elif [[ $remainder =~ ^[[:space:]][[:space:]] ]]; then
     SUBJECT_DESC="$(trim "$remainder")"
-    error subject 'more than one space after the colon' \
+    error subject 'extra whitespace after the colon' \
       --at 1 "$separator_col" 3 \
-      --why 'the separator is exactly ": " — colon followed by one space' \
+      --why 'the separator is exactly ": " — one colon, one space, then the description' \
       --fix "write \"${prefix}: ${SUBJECT_DESC}\""
 
   else
@@ -578,7 +555,7 @@ check_type() {
     error subject "unknown type \"${SUBJECT_TYPE}\"" \
       --at 1 1 "${#SUBJECT_TYPE}" \
       --why "the spec allows any noun (§1, §14); this repo keeps to a list so changelog tooling stays predictable: $(list_types)" \
-      --fix "${suggestion:+did you mean \"${suggestion}\"? — }an unlisted type still commits, but changelog tooling ignores it"
+      --fix "${suggestion:+did you mean \"${suggestion}\"? — }add it to commitMsg.types if this repo should accept it"
 
   elif [[ $SUBJECT_TYPE != "$lowercase" ]]; then
     error subject "type \"${SUBJECT_TYPE}\" is not lowercase" \
