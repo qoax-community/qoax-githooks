@@ -737,6 +737,20 @@ looks_like_footer() {
     [[ $1 == 'BREAKING CHANGE'* || $1 == 'BREAKING-CHANGE'* ]]
 }
 
+# A final paragraph is only a footer block when a line in it really does parse
+# as a footer; a paragraph of prose stays body text however it is punctuated.
+# This is what git's own trailer parser does, and without it any sentence that
+# ends a message carrying a colon reads as a broken footer token.
+has_well_formed_footer() {
+  local footer_start="$1" idx
+
+  for ((idx = footer_start; idx < ${#LINES[@]}; idx++)); do
+    is_blank "${LINES[idx]}" && continue
+    looks_like_footer "${LINES[idx]}" && return 0
+  done
+  return 1
+}
+
 check_breaking_change() {
   local footer_start="$1" idx line lowercase token line_no
 
@@ -777,7 +791,9 @@ check_breaking_change() {
 # A footer token uses "-" where a sentence would use a space — that is what
 # tells a parser "Reviewed-by: Z" apart from a body paragraph.
 check_footer_tokens() {
-  local footer_start="$1" idx line token
+  local footer_start="$1" idx line token block_is_real=1
+
+  has_well_formed_footer "$footer_start" || block_is_real=0
 
   for ((idx = footer_start; idx < ${#LINES[@]}; idx++)); do
     line="${LINES[idx]}"
@@ -787,6 +803,13 @@ check_footer_tokens() {
     [[ $line =~ ^([A-Za-z][A-Za-z0-9]*([[:space:]]+[A-Za-z0-9]+)+)(:[[:space:]]|[[:space:]]#) ]] || continue
 
     token="${BASH_REMATCH[1]}"
+    # Alongside a well-formed footer this is a malformed one, because the whole
+    # block is discarded over it. Standing in a paragraph of prose it is only a
+    # sentence, unless the token is one we actually recognise. A novel token
+    # written with spaces and no dashed neighbour cannot be told from a
+    # sentence, so it goes unreported rather than taking every sentence with it.
+    ((block_is_real)) || is_known_footer_token "${token// /-}" || continue
+
     error footer "footer token \"${token}\" contains spaces" \
       --at $((idx + 1)) 1 "${#token}" \
       --why 'a footer token MUST use - in place of whitespace, e.g. Acked-by — that is what separates a footer from a multi-paragraph body' \
