@@ -15,7 +15,36 @@
 #   commitMsg.subjectMax    max subject length      (default 72)
 #   commitMsg.bodyMax       max body line length    (default 100)
 #
+# Requires bash 4+ (associative arrays, case conversion). Uses no external
+# commands beyond git, so it behaves the same on Linux, macOS and BSD.
+#
 set -uo pipefail
+
+# macOS still ships bash 3.2 as /bin/bash, and `env bash` may well find it
+# first. Re-exec into a newer bash if the system has one, and otherwise skip
+# validation with a loud warning rather than blocking the commit.
+if ((BASH_VERSINFO[0] < 4)); then
+  # The sentinel makes a second re-exec impossible, whatever a candidate
+  # reports about itself.
+  if [ -z "${COMMIT_MSG_HOOK_REEXEC-}" ]; then
+    for candidate in /opt/homebrew/bin/bash /usr/local/bin/bash /usr/bin/bash /bin/bash; do
+      [ -x "$candidate" ] || continue
+      candidate_major="$("$candidate" -c 'printf %s "${BASH_VERSINFO[0]}"' 2>/dev/null)"
+      case "$candidate_major" in
+        ''|*[!0-9]*) continue ;;
+      esac
+      if [ "$candidate_major" -ge 4 ]; then
+        COMMIT_MSG_HOOK_REEXEC=1 exec "$candidate" "$0" "$@"
+      fi
+    done
+  fi
+
+  printf '\ncommit-msg: bash %s is too old to validate this commit message.\n' \
+    "${BASH_VERSION%%(*}" >&2
+  printf '            the hook needs bash 4+ — install it with `brew install bash`.\n' >&2
+  printf '            commit message conventions are NOT being checked.\n\n' >&2
+  exit 0
+fi
 
 readonly SPEC_URL='https://www.conventionalcommits.org/en/v1.0.0/'
 readonly DEFAULT_TYPES=(feat fix docs style refactor perf test build ci chore revert)
@@ -73,6 +102,12 @@ LINES=()
 die() {
   printf '%scommit-msg:%s %s\n' "${RED-}" "${OFF-}" "$1" >&2
   exit 1
+}
+
+# A whitespace-only line separates paragraphs just like an empty one, and
+# git's own message cleanup would turn it into one.
+is_blank() {
+  [[ -z ${1//[[:space:]]/} ]]
 }
 
 # Strip leading and trailing whitespace from $1.
@@ -149,18 +184,27 @@ setup_colours() {
   fi
 }
 
-# Mirror git's own cleanup so we validate what git will actually store: drop the
-# verbose diff below the scissors line, drop comments, normalise CRLF, then trim
-# blank lines from both ends.
+# Mirror git's own cleanup so we validate what git will actually store: ignore
+# everything below the verbose-diff scissors line, drop comments, normalise
+# CRLF, then trim blank lines from both ends. Kept free of sed/tac so the hook
+# does not depend on GNU coreutils.
 read_message() {
-  local msg_file="$1" cleaned
+  local msg_file="$1" line
+  local -a kept=()
 
-  cleaned="$(sed -e '/^# *-\{2,\} >8 -\{2,\}/,$d' -e 's/\r$//' -e '/^#/d' "$msg_file")"
-  cleaned="$(printf '%s\n' "$cleaned" | sed -e '/./,$!d' | tac | sed -e '/./,$!d' | tac)"
+  while IFS= read -r line || [[ -n $line ]]; do
+    line="${line%$'\r'}"
+    [[ $line =~ ^#[[:space:]]*-{2,}[[:space:]]*\>8[[:space:]]*-{2,} ]] && break
+    [[ $line == '#'* ]] && continue
+    kept+=("$line")
+  done <"$msg_file"
 
-  mapfile -t LINES <<<"$cleaned"
-  # mapfile on an empty string still yields one empty line.
-  ((${#LINES[@]} == 1 && ${#LINES[0]} == 0)) && LINES=()
+  local first=0 last=$((${#kept[@]} - 1))
+  while ((first <= last)) && is_blank "${kept[first]}"; do first=$((first + 1)); done
+  while ((last >= first)) && is_blank "${kept[last]}"; do last=$((last - 1)); done
+
+  LINES=()
+  ((first <= last)) && LINES=("${kept[@]:first:last - first + 1}")
 
   return 0
 }
@@ -449,8 +493,10 @@ check_scope() {
   local col=$((${#SUBJECT_TYPE} + 2))
 
   if [[ -z $SUBJECT_SCOPE ]]; then
+    # The parentheses themselves are the problem, and they start one column
+    # before the (absent) scope text.
     error subject 'empty scope "()"' \
-      --at 1 "$col" 2 \
+      --at 1 $((col - 1)) 2 \
       --why 'a scope MUST be a noun describing a section of the codebase' \
       --fix "drop the parentheses or fill them in, e.g. \"${SUBJECT_TYPE:-feat}(legal): ...\""
 
@@ -522,7 +568,7 @@ check_imperative_mood() {
 check_body() {
   ((${#LINES[@]} > 1)) || return 0
 
-  if [[ -n ${LINES[1]} ]]; then
+  if ! is_blank "${LINES[1]}"; then
     error body 'no blank line after the subject' \
       --at 2 1 "${#LINES[1]}" \
       --why 'the body MUST begin one blank line after the description — parsers split the header there' \
@@ -564,7 +610,7 @@ check_footers() {
   # at all, every line after the subject is a footer candidate.
   local idx footer_start=1
   for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
-    [[ -z ${LINES[idx]} ]] && footer_start=$((idx + 1))
+    is_blank "${LINES[idx]}" && footer_start=$((idx + 1))
   done
 
   check_breaking_change
@@ -597,7 +643,7 @@ check_breaking_change() {
         --fix 'write "BREAKING CHANGE: environment variables now take precedence over config files"'
     fi
 
-    if ((idx > 1)) && [[ -n ${LINES[idx - 1]} ]]; then
+    if ((idx > 1)) && ! is_blank "${LINES[idx - 1]}"; then
       error footer 'BREAKING CHANGE footer is not preceded by a blank line' \
         --at "$line_no" 1 "${#token}" \
         --why 'footers MUST start one blank line after the body' \
@@ -630,7 +676,7 @@ check_footers_in_body() {
 
   for ((idx = 2; idx < footer_start; idx++)); do
     line="${LINES[idx]}"
-    [[ -n ${LINES[idx - 1]} ]] || continue
+    is_blank "${LINES[idx - 1]}" && continue
     [[ $line =~ ^([A-Za-z][A-Za-z0-9-]*)(:[[:space:]]|[[:space:]]#) ]] || continue
 
     token="${BASH_REMATCH[1]}"
