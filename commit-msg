@@ -100,7 +100,7 @@ BODY_MAX=100
 # The cleaned-up commit message, one line per element, filled in by read_message.
 LINES=()
 
-# ============================================================== small helpers
+# --- Helpers ----------------------------------------------------------------
 
 die() {
   printf '%scommit-msg:%s %s\n' "${RED-}" "${OFF-}" "$1" >&2
@@ -157,7 +157,7 @@ suggest_type() {
   done
 }
 
-# ==================================================================== set-up
+# --- Set-up and input -------------------------------------------------------
 
 load_config() {
   local configured
@@ -220,7 +220,7 @@ is_generated_by_git() {
   esac
 }
 
-# ================================================================== findings
+# --- Findings ---------------------------------------------------------------
 
 readonly FIELD_SEP=$'\x1f'
 FINDINGS=()
@@ -260,7 +260,7 @@ add_finding() {
 error()   { add_finding error "$@"; }
 warning() { add_finding warning "$@"; }
 
-# ============================================================ subject checks
+# --- Subject checks ---------------------------------------------------------
 
 # Filled in by split_subject / parse_prefix / parse_description.
 SUBJECT_PREFIX=''     # everything before the first colon, exactly as written
@@ -274,7 +274,7 @@ SUBJECT_DESC_COL=0    # column of the first description character, 1-based
 check_subject() {
   local raw="${LINES[0]}"
 
-  check_subject_whitespace "$raw"
+  check_subject_indent "$raw"
   check_subject_length "$(trim "$raw")"
 
   # A raw `git revert` subject gets one targeted finding; parsing it further
@@ -302,22 +302,19 @@ check_subject() {
   return 0
 }
 
-check_subject_whitespace() {
+# Leading whitespace is an error because git keeps it: its message cleanup
+# strips trailing whitespace and blank lines, never indentation, so an indented
+# type reaches the stored commit and defeats every parser reading it. Trailing
+# whitespace is only a warning — see check_trailing_whitespace.
+check_subject_indent() {
   local raw="$1"
 
-  if [[ $raw =~ ^[[:space:]] ]]; then
-    error subject 'leading whitespace before the type' \
-      --at 1 1 1 \
-      --why 'the type MUST be the first character of the commit message' \
-      --fix 'remove the indentation'
-  fi
+  [[ $raw =~ ^[[:space:]] ]] || return 0
 
-  if [[ $raw =~ [[:space:]]$ ]]; then
-    error subject 'trailing whitespace' \
-      --at 1 "${#raw}" 1 \
-      --why 'trailing whitespace breaks changelog parsers and shows up as noise in git log' \
-      --fix 'strip the whitespace at the end of the subject'
-  fi
+  error subject 'leading whitespace before the type' \
+    --at 1 1 1 \
+    --why 'the type MUST be the first character of the commit message' \
+    --fix 'remove the indentation'
 }
 
 check_subject_length() {
@@ -566,7 +563,7 @@ check_imperative_mood() {
   fi
 }
 
-# =============================================================== body checks
+# --- Body and whitespace checks ---------------------------------------------
 
 check_body() {
   ((${#LINES[@]} > 1)) || return 0
@@ -604,7 +601,38 @@ check_body_line_length() {
   done
 }
 
-# ============================================================= footer checks
+# Trailing whitespace persists only when a message is committed with
+# --cleanup=verbatim; git's default cleanup strips it from every line, and does
+# so after this hook has run. Worth pointing out, not worth refusing a commit
+# that git was about to tidy up by itself.
+check_trailing_whitespace() {
+  local idx line stripped start width location
+
+  for ((idx = 0; idx < ${#LINES[@]}; idx++)); do
+    line="${LINES[idx]}"
+    [[ $line =~ [[:space:]]$ ]] || continue
+
+    # Underline the run of whitespace, or the whole line when it holds nothing
+    # else.
+    stripped="${line%"${line##*[![:space:]]}"}"
+    start=$((${#stripped} + 1))
+    width=$((${#line} - ${#stripped}))
+    if ((width == 0)); then
+      start=1
+      width=${#line}
+    fi
+
+    location=body
+    ((idx == 0)) && location=subject
+
+    warning "$location" 'trailing whitespace' \
+      --at $((idx + 1)) "$start" "$width" \
+      --why "git strips it under the default cleanup, but --cleanup=verbatim keeps it in the commit" \
+      --fix 'remove the whitespace at the end of the line'
+  done
+}
+
+# --- Footer checks ----------------------------------------------------------
 
 check_footers() {
   ((${#LINES[@]} > 1)) || return 0
@@ -712,7 +740,7 @@ check_no_ai_attribution() {
   done
 }
 
-# ================================================================= reporting
+# --- Reporting --------------------------------------------------------------
 
 report() {
   local msg_file="$1"
@@ -810,7 +838,7 @@ print_reference() {
   printf '  %sspec%s    %s\n' "$DIM" "$OFF" "$SPEC_URL" >&2
 }
 
-# ====================================================================== main
+# --- Entry point ------------------------------------------------------------
 
 main() {
   setup_colours
@@ -827,6 +855,7 @@ main() {
   check_subject
   check_body
   check_footers
+  check_trailing_whitespace
 
   report "$msg_file"
 }
