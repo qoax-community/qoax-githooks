@@ -4,8 +4,14 @@
 # https://www.conventionalcommits.org/en/v1.0.0/
 #
 # Collects *every* violation in a single pass, then prints each one with the
-# offending text, the rule it breaks, and a concrete fix. Errors abort the
-# commit; warnings are printed but let it through.
+# offending text, the rule it breaks, and a concrete fix.
+#
+# Errors abort the commit and are reserved for the spec's own MUSTs: a missing
+# type or ": " separator, an empty scope, a body not separated from the
+# subject, a malformed BREAKING CHANGE token, a footer token with spaces in it.
+# Everything the spec permits but this repo would rather avoid — casing, an
+# unlisted type, subject length, imperative mood, a trailing full stop, body
+# width — is a warning, printed and then allowed through.
 #
 # Enable:   git config core.hooksPath .githooks
 # Bypass:   git commit --no-verify
@@ -50,7 +56,9 @@ if ((BASH_VERSINFO[0] < 4)); then
 fi
 
 readonly SPEC_URL='https://www.conventionalcommits.org/en/v1.0.0/'
-readonly DEFAULT_TYPES=(feat fix docs style refactor perf test build ci chore revert)
+readonly DEFAULT_TYPES=(
+  feat fix docs style refactor perf test build ci chore revert security
+)
 
 # Footer tokens common enough that a match inside the body is worth flagging.
 readonly KNOWN_FOOTER_TOKENS=(
@@ -96,6 +104,7 @@ declare -rA IMPERATIVE_FORM=(
 TYPES=()
 SUBJECT_MAX=72
 BODY_MAX=100
+COMMENT_CHAR='#'
 
 # The cleaned-up commit message, one line per element, filled in by read_message.
 LINES=()
@@ -169,11 +178,22 @@ load_config() {
     TYPES=("${DEFAULT_TYPES[@]}")
   fi
 
+  # 10# keeps a value written as 010 or 08 out of bash's octal arithmetic,
+  # where it would silently mean 8, or fail outright.
   configured="$(git config --get commitMsg.subjectMax || true)"
-  [[ $configured =~ ^[0-9]+$ ]] && SUBJECT_MAX="$configured"
+  [[ $configured =~ ^[0-9]+$ ]] && SUBJECT_MAX=$((10#$configured))
 
   configured="$(git config --get commitMsg.bodyMax || true)"
-  [[ $configured =~ ^[0-9]+$ ]] && BODY_MAX="$configured"
+  [[ $configured =~ ^[0-9]+$ ]] && BODY_MAX=$((10#$configured))
+
+  # Comments are whatever core.commentChar says they are, not always "#".
+  configured="$(git config --get core.commentChar || true)"
+  case "$configured" in
+    '') COMMENT_CHAR='#' ;;
+    auto) COMMENT_CHAR=auto ;;
+    ?) COMMENT_CHAR="$configured" ;;
+    *) COMMENT_CHAR='#' ;;
+  esac
 
   return 0
 }
@@ -192,15 +212,21 @@ setup_colours() {
 # CRLF, then trim blank lines from both ends. Kept free of sed/tac so the hook
 # does not depend on GNU coreutils.
 read_message() {
-  local msg_file="$1" line
-  local -a kept=()
+  local msg_file="$1" line marker
+  local -a raw=() kept=()
 
   while IFS= read -r line || [[ -n $line ]]; do
-    line="${line%$'\r'}"
-    [[ $line =~ ^#[[:space:]]*-{2,}[[:space:]]*\>8[[:space:]]*-{2,} ]] && break
-    [[ $line == '#'* ]] && continue
-    kept+=("$line")
+    raw+=("${line%$'\r'}")
   done <"$msg_file"
+
+  marker="$(resolve_comment_char ${raw[@]+"${raw[@]}"})"
+
+  for line in ${raw[@]+"${raw[@]}"}; do
+    # Everything from the scissors line down is the verbose diff, not message.
+    [[ $line == "$marker"* && $line == *'>8'* && $line == *--* ]] && break
+    [[ $line == "$marker"* ]] && continue
+    kept+=("$line")
+  done
 
   local first=0 last=$((${#kept[@]} - 1))
   while ((first <= last)) && is_blank "${kept[first]}"; do first=$((first + 1)); done
@@ -212,12 +238,39 @@ read_message() {
   return 0
 }
 
-# Merge commits and autosquash markers are written by git, not by the author.
+# core.commentChar=auto makes git pick the first candidate character that no
+# line already starts with, so mirror that choice instead of assuming "#".
+# Takes the message lines as arguments.
+resolve_comment_char() {
+  local candidates='#;@!$%^&|:' candidate line idx used
+
+  if [[ $COMMENT_CHAR != auto ]]; then
+    printf '%s' "$COMMENT_CHAR"
+    return 0
+  fi
+
+  for ((idx = 0; idx < ${#candidates}; idx++)); do
+    candidate="${candidates:idx:1}"
+    used=0
+    for line in "$@"; do
+      [[ $line == "$candidate"* ]] && { used=1; break; }
+    done
+    ((used)) || { printf '%s' "$candidate"; return 0; }
+  done
+
+  printf '#'
+}
+
+# Autosquash markers are written by git. So is a merge subject — but only
+# during an actual merge; "Merge the two config files" typed by hand is an
+# ordinary commit and gets checked like any other.
 is_generated_by_git() {
   case "$1" in
-    Merge\ *|fixup!*|squash!*|amend!*) return 0 ;;
-    *) return 1 ;;
+    fixup!*|squash!*|amend!*) return 0 ;;
   esac
+
+  [[ $1 == Merge\ * ]] || return 1
+  [ -e "$(git rev-parse --git-path MERGE_HEAD 2>/dev/null)" ]
 }
 
 # --- Findings ---------------------------------------------------------------
@@ -321,9 +374,9 @@ check_subject_length() {
   local subject="$1"
   ((${#subject} > SUBJECT_MAX)) || return 0
 
-  error subject "subject is ${#subject} characters (max ${SUBJECT_MAX})" \
+  warning subject "subject is ${#subject} characters (max ${SUBJECT_MAX})" \
     --at 1 $((SUBJECT_MAX + 1)) $((${#subject} - SUBJECT_MAX)) \
-    --why 'longer subjects are silently truncated in git log and in the GitHub/GitLab UI' \
+    --why 'no spec limit, but longer subjects are truncated in git log and in the GitHub/GitLab UI' \
     --fix 'shorten the description and move the detail into the body'
 }
 
@@ -357,8 +410,8 @@ split_subject() {
   SUBJECT_PREFIX="${subject%%:*}"
   SUBJECT_REMAINDER="${subject#*:}"
 
-  SUBJECT_DESC_COL=$((${#SUBJECT_PREFIX} + 2))
-  [[ $SUBJECT_REMAINDER == " "* ]] && SUBJECT_DESC_COL=$((SUBJECT_DESC_COL + 1))
+  local spacing="${SUBJECT_REMAINDER%%[![:space:]]*}"
+  SUBJECT_DESC_COL=$((${#SUBJECT_PREFIX} + 2 + ${#spacing}))
 
   return 0
 }
@@ -398,7 +451,8 @@ split_type_and_scope() {
     SUBJECT_SCOPE="${prefix#*(}"
     SUBJECT_SCOPE="${SUBJECT_SCOPE%%)*}"
 
-    local trailing="${prefix##*)}"
+    # Deliberately the *first* ")": "feat(api)(ui)" must not look well formed.
+    local trailing="${prefix#*)}"
     if [[ -n $trailing ]]; then
       error subject "unexpected \"${trailing}\" after the scope" \
         --why 'the prefix ends with the scope, an optional "!", then the colon' \
@@ -462,9 +516,9 @@ check_type() {
   fi
 
   if [[ ! $SUBJECT_TYPE =~ ^[A-Za-z]+$ ]]; then
-    error subject "invalid type \"${SUBJECT_TYPE}\"" \
+    warning subject "unusual type \"${SUBJECT_TYPE}\"" \
       --at 1 1 "${#SUBJECT_TYPE}" \
-      --why 'a type is a single lowercase word (letters only)' \
+      --why 'the spec calls for a noun (§1); anything else confuses changelog tooling' \
       --fix "use one of: $(list_types)"
     return 0
   fi
@@ -474,15 +528,15 @@ check_type() {
   if ! is_known_type "$lowercase"; then
     local suggestion
     suggestion="$(suggest_type "$lowercase")"
-    error subject "unknown type \"${SUBJECT_TYPE}\"" \
+    warning subject "unknown type \"${SUBJECT_TYPE}\"" \
       --at 1 1 "${#SUBJECT_TYPE}" \
-      --why "allowed types: $(list_types)" \
-      --fix "${suggestion:+did you mean \"${suggestion}\"? — }commits with an unlisted type are skipped by changelog tooling"
+      --why "the spec allows any noun as a type (§1, §14); this repo's list is: $(list_types)" \
+      --fix "${suggestion:+did you mean \"${suggestion}\"? — }an unlisted type still commits, but changelog tooling ignores it"
 
   elif [[ $SUBJECT_TYPE != "$lowercase" ]]; then
-    error subject "type \"${SUBJECT_TYPE}\" is not lowercase" \
+    warning subject "type \"${SUBJECT_TYPE}\" is not lowercase" \
       --at 1 1 "${#SUBJECT_TYPE}" \
-      --why 'the spec is case-insensitive but a single casing MUST be used consistently — this repo uses lowercase' \
+      --why 'the spec forbids treating types as case-sensitive (§15); consistent casing is only a convention' \
       --fix "write \"${lowercase}\""
   fi
 }
@@ -501,9 +555,9 @@ check_scope() {
       --fix "drop the parentheses or fill them in, e.g. \"${SUBJECT_TYPE:-feat}(legal): ...\""
 
   elif [[ ! $SUBJECT_SCOPE =~ ^[a-z0-9]+([-_./,][a-z0-9]+)*$ ]]; then
-    error subject "invalid scope \"${SUBJECT_SCOPE}\"" \
+    warning subject "unusual scope \"${SUBJECT_SCOPE}\"" \
       --at 1 "$col" "${#SUBJECT_SCOPE}" \
-      --why 'a scope is a lowercase noun; separate words with - . _ / and multiple scopes with ,' \
+      --why 'the spec only asks for a noun in parentheses (§4); this repo keeps scopes lowercase' \
       --fix 'e.g. (auth), (api/routes), (legal.terms)'
 
   elif [[ $SUBJECT_SCOPE =~ (ing|ed)$ || $SUBJECT_SCOPE =~ ^(add|fix|update|remove|refactor) ]]; then
@@ -520,22 +574,22 @@ check_description() {
   local desc="$SUBJECT_DESC" col="$SUBJECT_DESC_COL"
 
   if [[ $desc =~ ^[[:upper:]] ]]; then
-    error subject 'description starts with a capital letter' \
+    warning subject 'description starts with a capital letter' \
       --at 1 "$col" 1 \
-      --why 'descriptions stay lowercase so generated changelog entries read uniformly' \
+      --why 'the spec is case-insensitive here (§15); lowercase keeps changelog entries uniform' \
       --fix "write \"${desc,}\""
   fi
 
   if [[ $desc == *. ]]; then
-    error subject 'description ends with a period' \
+    warning subject 'description ends with a period' \
       --at 1 $((col + ${#desc} - 1)) 1 \
-      --why 'the subject is a title, not a sentence — trailing punctuation breaks changelog formatting' \
+      --why 'not a spec rule — the subject is a title, and a full stop reads oddly in a changelog list' \
       --fix "write \"${desc%.}\""
   fi
 
   check_imperative_mood "$desc" "$col"
 
-  if [[ $desc =~ (^|[^a-z])(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)[[:space:]]+#[0-9]+ ]]; then
+  if [[ ${desc,,} =~ (^|[^a-z])(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)[[:space:]]+#[0-9]+ ]]; then
     warning subject 'issue reference in the subject line' \
       --at 1 "$col" "${#desc}" \
       --why 'issue-closing keywords belong in a footer so the subject stays short and parseable' \
@@ -550,9 +604,9 @@ check_imperative_mood() {
   local lowercase="${first_word,,}"
 
   if [[ -n ${IMPERATIVE_FORM[$lowercase]-} ]]; then
-    error subject "\"${lowercase}\" is not imperative mood" \
+    warning subject "\"${lowercase}\" is not imperative mood" \
       --at 1 "$col" "${#first_word}" \
-      --why 'the description reads as an instruction — "add", not "added" or "adds"' \
+      --why 'not a spec rule — git convention is an instruction: "add", not "added" or "adds"' \
       --fix "write \"${IMPERATIVE_FORM[$lowercase]}${rest}\""
 
   elif [[ $lowercase =~ (ing|ed)$ ]] && ((${#lowercase} > 5)); then
@@ -590,9 +644,10 @@ check_body_line_length() {
     fi
     ((in_code_fence)) && continue
 
-    # Unbreakable lines (a lone URL, a table row) are left alone.
     ((${#line} > BODY_MAX)) || continue
-    [[ $line == *' '* && $line != *http* ]] || continue
+    # A single long token — a URL, a path, a hash — has nowhere to wrap. Prose
+    # that merely mentions one does.
+    [[ $(trim "$line") == *' '* ]] || continue
 
     warning body "line $((idx + 1)) is ${#line} characters (max ${BODY_MAX})" \
       --at $((idx + 1)) $((BODY_MAX + 1)) $((${#line} - BODY_MAX)) \
@@ -637,26 +692,60 @@ check_trailing_whitespace() {
 check_footers() {
   ((${#LINES[@]} > 1)) || return 0
 
-  # The footer block is everything after the last blank line. With no blank line
-  # at all, every line after the subject is a footer candidate.
-  local idx footer_start=1
-  for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
-    is_blank "${LINES[idx]}" && footer_start=$((idx + 1))
-  done
+  local footer_start
+  footer_start="$(find_footer_start)"
 
-  check_breaking_change
+  check_breaking_change "$footer_start"
   check_footer_tokens "$footer_start"
   check_footers_in_body "$footer_start"
-  check_no_ai_attribution
+  check_no_ai_attribution "$footer_start"
+}
+
+# Where the footer block begins: the last paragraph, extended back over any
+# earlier paragraph that also opens with a footer token. "BREAKING CHANGE: …",
+# a blank line, then "Refs: #1" is one footer section — not a body followed by
+# a footer. With no blank line anywhere, every line after the subject is a
+# footer candidate.
+find_footer_start() {
+  local idx start=1 candidate
+
+  for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
+    is_blank "${LINES[idx]}" && start=$((idx + 1))
+  done
+
+  while ((start > 1)); do
+    # Step back to the last line of the paragraph before this one...
+    idx=$((start - 1))
+    while ((idx >= 1)) && is_blank "${LINES[idx]}"; do idx=$((idx - 1)); done
+    ((idx >= 1)) || break
+
+    # ...then rewind to where that paragraph starts.
+    while ((idx > 1)) && ! is_blank "${LINES[idx - 1]}"; do idx=$((idx - 1)); done
+    candidate=$idx
+
+    looks_like_footer "${LINES[candidate]}" || break
+    start=$candidate
+  done
+
+  printf '%s' "$start"
+}
+
+# Does this line open a footer — "Token: value", "Token #value", or the one
+# token the spec spells with a space?
+looks_like_footer() {
+  [[ $1 =~ ^[A-Za-z][A-Za-z0-9-]*(:[[:space:]]|[[:space:]]#) ]] ||
+    [[ $1 == 'BREAKING CHANGE'* || $1 == 'BREAKING-CHANGE'* ]]
 }
 
 check_breaking_change() {
-  local idx line lowercase token line_no
+  local footer_start="$1" idx line lowercase token line_no
 
   for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
     line="${LINES[idx]}"
     lowercase="${line,,}"
-    [[ $lowercase == 'breaking change'* || $lowercase == 'breaking-change'* ]] || continue
+    # The token proper, followed by its colon or ending the line — so that body
+    # prose such as "Breaking changes are listed below." is left alone.
+    [[ $lowercase =~ ^breaking[[:space:]-]change[[:space:]]*(:|$) ]] || continue
 
     line_no=$((idx + 1))
     token="${line%%:*}"
@@ -674,11 +763,13 @@ check_breaking_change() {
         --fix 'write "BREAKING CHANGE: environment variables now take precedence over config files"'
     fi
 
-    if ((idx > 1)) && ! is_blank "${LINES[idx - 1]}"; then
-      error footer 'BREAKING CHANGE footer is not preceded by a blank line' \
+    # Footers stack inside one block, so only a breaking change stranded in
+    # the body is misplaced — "Refs: #42" directly above it is perfectly legal.
+    if ((idx < footer_start)); then
+      error footer 'BREAKING CHANGE footer sits inside the body' \
         --at "$line_no" 1 "${#token}" \
-        --why 'footers MUST start one blank line after the body' \
-        --fix 'insert an empty line before the footer block'
+        --why 'the footer block MUST start one blank line after the body (§8)' \
+        --fix 'move it into the footer block, or add a blank line above it'
     fi
   done
 }
@@ -690,7 +781,9 @@ check_footer_tokens() {
 
   for ((idx = footer_start; idx < ${#LINES[@]}; idx++)); do
     line="${LINES[idx]}"
-    [[ $line == 'BREAKING CHANGE'* ]] && continue
+    # Breaking-change lines are check_breaking_change's business, whatever
+    # case they are written in; reporting them twice helps nobody.
+    [[ ${line,,} =~ ^breaking[[:space:]-]change[[:space:]]*(:|$) ]] && continue
     [[ $line =~ ^([A-Za-z][A-Za-z0-9]*([[:space:]]+[A-Za-z0-9]+)+)(:[[:space:]]|[[:space:]]#) ]] || continue
 
     token="${BASH_REMATCH[1]}"
@@ -703,9 +796,14 @@ check_footer_tokens() {
 
 # A footer-looking line glued to the body is read as body text by parsers.
 check_footers_in_body() {
-  local footer_start="$1" idx line token
+  local footer_start="$1" idx line token scan_end="$1"
 
-  for ((idx = 2; idx < footer_start; idx++)); do
+  # When the last paragraph does not open with a footer token it is body text,
+  # so trailers glued to the end of it are misplaced too — the commonest shape
+  # of this mistake, and the one a boundary-only scan misses.
+  looks_like_footer "${LINES[footer_start]}" || scan_end=${#LINES[@]}
+
+  for ((idx = 2; idx < scan_end; idx++)); do
     line="${LINES[idx]}"
     is_blank "${LINES[idx - 1]}" && continue
     [[ $line =~ ^([A-Za-z][A-Za-z0-9-]*)(:[[:space:]]|[[:space:]]#) ]] || continue
@@ -720,14 +818,21 @@ check_footers_in_body() {
   done
 }
 
-# This repo attributes commits to their human author only.
+# This repo attributes commits to their human author only. Scoped to the footer
+# block, where trailers live: body prose that merely mentions a tool by name is
+# not an attribution.
 check_no_ai_attribution() {
+  local footer_start="$1"
   local agents='(claude|anthropic|copilot|chatgpt|gpt-|cursor|codex|bot@)'
   local idx line lowercase
 
-  for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
+  for ((idx = footer_start; idx < ${#LINES[@]}; idx++)); do
     line="${LINES[idx]}"
     lowercase="${line,,}"
+
+    # A trailer, or the robot marker these tools sign off with. Prose that
+    # happens to name a tool is just prose.
+    looks_like_footer "$line" || [[ $line == 🤖* ]] || continue
 
     if [[ $lowercase =~ ^co-authored-by:.*$agents ]] ||
        [[ $lowercase =~ (generated[[:space:]]with|created[[:space:]]by).*$agents ]] ||
