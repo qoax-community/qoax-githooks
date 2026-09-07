@@ -76,12 +76,25 @@ jobs:
           elif [ -n "${PUSH_BEFORE#0000000000000000000000000000000000000000}" ]; then
             range="${PUSH_BEFORE}..${PUSH_AFTER}"
           else
+            # The branch was created by this push, so there is no range to
+            # compare against. Everything it carries would mean the whole
+            # history, which predates this convention, so check the tip and say
+            # plainly that the rest went unchecked rather than implying it did.
             range="${PUSH_AFTER}~1..${PUSH_AFTER}"
+            printf '::notice::branch created by this push — only its tip commit is checked\n'
           fi
 
-          commits="$(git rev-list --no-merges --reverse "$range" 2>/dev/null || true)"
+          # A range that cannot be enumerated is a broken assumption, not an
+          # empty result: after a force-push the old tip is simply gone. Say so
+          # instead of quietly falling back to checking one commit.
+          if ! commits="$(git rev-list --no-merges --reverse "$range")"; then
+            printf '::error::cannot enumerate %s — the range is not available in this ' "$range"
+            printf 'checkout, which happens after a force-push. Re-run this job.\n'
+            exit 1
+          fi
+
           if [ -z "$commits" ]; then
-            commits="$(git rev-list --no-merges -1 "$PUSH_AFTER")"
+            printf 'no commits in %s\n' "$range"
           fi
 
           for sha in $commits; do
