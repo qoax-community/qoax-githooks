@@ -10,6 +10,9 @@
 # Enable:   git config core.hooksPath .githooks
 # Bypass:   git commit --no-verify
 #
+# Set COMMIT_MSG_REPORT_ONLY=1 when running it outside a commit (CI checking
+# an existing message), so the report drops the "commit aborted" wording.
+#
 # Optional overrides (git config):
 #   commitMsg.types         space separated list of allowed types
 #   commitMsg.subjectMax    max subject length      (default 72)
@@ -733,8 +736,13 @@ report() {
   print_reference
 
   if ((ERROR_COUNT)); then
-    printf '\n%scommit aborted.%s your message is kept in %s — fix it and commit again%s\n\n' \
-      "$RED" "$OFF" "$msg_file" "${DIM}, or bypass with --no-verify${OFF}" >&2
+    if [[ -n ${COMMIT_MSG_REPORT_ONLY-} ]]; then
+      printf '\n%smessage rejected.%s rewrite it to follow the format above\n\n' \
+        "$RED" "$OFF" >&2
+    else
+      printf '\n%scommit aborted.%s your message is kept in %s — fix it and commit again%s\n\n' \
+        "$RED" "$OFF" "$msg_file" "${DIM}, or bypass with --no-verify${OFF}" >&2
+    fi
     exit 1
   fi
 

@@ -1,0 +1,103 @@
+name: Check commit conventions
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: commit-conventions-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  conventional-commits:
+    name: Conventional Commits
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+
+      # Runs the same commit-msg contributors get locally, so the
+      # rules cannot drift apart. A pull request title is checked too: with
+      # squash merging it becomes the commit subject on main.
+      - name: Validate commit messages and pull request title
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          COMMIT_MSG_REPORT_ONLY: '1'
+        run: |
+          set -uo pipefail
+
+          hook=commit-msg
+
+          # A hook without the executable bit is silently skipped by git, so
+          # contributors would get no validation at all. Catch that here.
+          if [ ! -x "$hook" ]; then
+            printf '::error::%s is not executable, git will not run it. ' "$hook"
+            printf 'Fix with: git update-index --chmod=+x %s\n' "$hook"
+            exit 1
+          fi
+          message="$(mktemp)"
+          output="$(mktemp)"
+          failures=0
+
+          # Validate the message in $1, labelled $2 for the log and summary.
+          check() {
+            local label="$2"
+            if "$hook" "$1" >"$output" 2>&1; then
+              printf '::notice::%s — ok\n' "$label"
+              return 0
+            fi
+            failures=$((failures + 1))
+            printf '::group::%s — rejected\n' "$label"
+            cat "$output"
+            printf '::endgroup::\n'
+            {
+              printf '### %s\n\n```\n' "$label"
+              cat "$output"
+              printf '```\n\n'
+            } >>"$GITHUB_STEP_SUMMARY"
+          }
+
+          if [ "$EVENT_NAME" = pull_request ]; then
+            range="$(git merge-base "$BASE_SHA" "$HEAD_SHA")..${HEAD_SHA}"
+          elif [ -n "${PUSH_BEFORE#0000000000000000000000000000000000000000}" ]; then
+            range="${PUSH_BEFORE}..${PUSH_AFTER}"
+          else
+            range="${PUSH_AFTER}~1..${PUSH_AFTER}"
+          fi
+
+          commits="$(git rev-list --no-merges --reverse "$range" 2>/dev/null || true)"
+          if [ -z "$commits" ]; then
+            commits="$(git rev-list --no-merges -1 "$PUSH_AFTER")"
+          fi
+
+          for sha in $commits; do
+            git log -1 --format=%B "$sha" >"$message"
+            check "$message" "commit $(git log -1 --format=%h "$sha")"
+          done
+
+          # Passed through the environment rather than interpolated into this
+          # script, so a title can never be read as shell.
+          if [ "$EVENT_NAME" = pull_request ]; then
+            printf '%s\n' "$PR_TITLE" >"$message"
+            check "$message" 'pull request title'
+          fi
+
+          if [ "$failures" -gt 0 ]; then
+            printf '\n%s message(s) do not follow Conventional Commits v1.0.0.\n' "$failures" >&2
+            printf 'Rewrite them with `git rebase -i` (or edit the pull request title) and push again.\n' >&2
+            exit 1
+          fi
+
+          printf 'All checked messages follow Conventional Commits v1.0.0.\n'
