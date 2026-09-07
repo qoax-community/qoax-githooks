@@ -727,6 +727,20 @@ find_footer_start() {
     is_blank "${LINES[idx]}" && start=$((idx + 1))
   done
 
+  # verbatim keeps trailing blank lines, so the last paragraph can be empty.
+  if ((start >= ${#LINES[@]})); then
+    printf '%s' "$start"
+    return 0
+  fi
+
+  # Only a message that ends in a footer block has one. When the last paragraph
+  # is body text, an earlier footer-looking paragraph is stranded before it,
+  # not the start of a block.
+  if ! looks_like_footer "${LINES[start]}"; then
+    printf '%s' "$start"
+    return 0
+  fi
+
   while ((start > 1)); do
     # Step back to the last line of the paragraph before this one...
     idx=$((start - 1))
@@ -742,6 +756,14 @@ find_footer_start() {
   done
 
   printf '%s' "$start"
+}
+
+# First line of the paragraph that line <idx> belongs to.
+paragraph_start_of() {
+  local idx="$1"
+
+  while ((idx > 1)) && ! is_blank "${LINES[idx - 1]}"; do idx=$((idx - 1)); done
+  printf '%s' "$idx"
 }
 
 # Does this line open a footer — "Token: value", "Token #value", or the one
@@ -791,9 +813,13 @@ check_breaking_change() {
         --fix 'write "BREAKING CHANGE: environment variables now take precedence over config files"'
     fi
 
-    # Footers stack inside one block, so only a breaking change stranded in
-    # the body is misplaced — "Refs: #42" directly above it is perfectly legal.
-    if ((idx < footer_start)); then
+    # Footers stack inside one block, so "Refs: #42" directly above it is
+    # perfectly legal. What is not is a breaking change left in the body, or
+    # sharing a paragraph that opens with prose — git and the spec both read
+    # that as body text.
+    local para_start
+    para_start="$(paragraph_start_of "$idx")"
+    if ((idx < footer_start)) || ! looks_like_footer "${LINES[para_start]}"; then
       error footer 'BREAKING CHANGE footer sits inside the body' \
         --at "$line_no" 1 "${#token}" \
         --why 'the footer block MUST start one blank line after the body (§8)' \
@@ -843,7 +869,9 @@ check_footers_in_body() {
   # When the last paragraph does not open with a footer token it is body text,
   # so trailers glued to the end of it are misplaced too — the commonest shape
   # of this mistake, and the one a boundary-only scan misses.
-  looks_like_footer "${LINES[footer_start]}" || scan_end=${#LINES[@]}
+  if ((footer_start >= ${#LINES[@]})) || ! looks_like_footer "${LINES[footer_start]}"; then
+    scan_end=${#LINES[@]}
+  fi
 
   for ((idx = 2; idx < scan_end; idx++)); do
     line="${LINES[idx]}"
