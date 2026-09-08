@@ -385,7 +385,7 @@ SUBJECT_DESC=''
 SUBJECT_DESC_COL=0    # column of the first description character, 1-based
 SUBJECT_COL_OFFSET=0  # leading whitespace the subject columns are measured past
 MALFORMED_TOKEN=''    # footer token whose separator has already been reported
-MALFORMED_VALUE=''    # what followed that token, with the bad separator gone
+MALFORMED_FIX=''      # that line, rewritten with a separator git understands
 
 check_subject() {
   local raw="${LINES[0]}"
@@ -696,7 +696,7 @@ check_description() {
 
 check_imperative_mood() {
   local desc="$1" col="$2"
-  local first_word="${desc%%[ ,:;]*}"
+  local first_word="${desc%%[ ,:;.!?]*}"
   # A description opening with one of those delimiters has no first word, and
   # an empty subscript is a bash error rather than a lookup that finds nothing.
   [[ -n $first_word ]] || return 0
@@ -860,32 +860,46 @@ looks_like_footer() {
   # The separator is exactly ": " or " #" (§9) — a tab in its place is not a
   # footer to git, and check_footer_separators says so in as many words.
   [[ $1 =~ ^[A-Za-z][A-Za-z0-9-]*(:\ |\ #) ]] ||
-    [[ $1 =~ ^BREAKING[[:space:]-]CHANGE([[:space:]]*:|$) ]]
+    [[ $1 =~ ^BREAKING[[:space:]-]CHANGE([[:space:]]*:|[[:space:]]+#|$) ]]
 }
 
-# What stands between a footer token and its value. A tab reads like a space in
-# every editor and stops git's trailer parser dead, so a line that is plainly
-# meant as a footer is told, rather than quietly demoted to prose.
-# True when $1 is plainly meant as a footer but the colon is followed by
-# something other than a space. Sets MALFORMED_TOKEN and MALFORMED_VALUE.
-# Every other footer check skips such a line, so it is reported once.
+# What stands between a footer token and its value. §9 allows exactly two
+# separators, ": " and " #", and a tab reads like a space in every editor while
+# stopping git's trailer parser dead. True when $1 is plainly meant as a footer
+# and uses neither separator; sets MALFORMED_TOKEN and MALFORMED_FIX. Every
+# other footer check skips such a line, so it is reported once.
 has_malformed_separator() {
-  local line="$1" rest
+  local line="$1" rest gap
 
-  [[ $line =~ ^(BREAKING[[:space:]-]CHANGE|[A-Za-z][A-Za-z0-9-]*): ]] || return 1
-  MALFORMED_TOKEN="${BASH_REMATCH[1]}"
+  if [[ $line =~ ^(BREAKING[[:space:]-]CHANGE|[A-Za-z][A-Za-z0-9-]*): ]]; then
+    MALFORMED_TOKEN="${BASH_REMATCH[1]}"
+    is_footer_token "$MALFORMED_TOKEN" || return 1
 
-  # Only for a line nobody could mistake for prose: the breaking-change token,
-  # a dashed token, or one this repo already knows.
-  [[ $MALFORMED_TOKEN == BREAKING* || $MALFORMED_TOKEN == *-* ]] ||
-    is_known_footer_token "$MALFORMED_TOKEN" || return 1
+    rest="${line#*:}"
+    # A bare token line is check_breaking_change's business, not this one.
+    [[ -z $rest || $rest == ' '* ]] && return 1
+    MALFORMED_FIX="${MALFORMED_TOKEN}: ${rest#"${rest%%[![:space:]]*}"}"
+    return 0
+  fi
 
-  rest="${line#*:}"
-  # A bare token line is check_breaking_change's business, not this one.
-  [[ -z $rest || $rest == ' '* ]] && return 1
+  # The " #" form, which carries an issue reference: one space, then the hash.
+  if [[ $line =~ ^(BREAKING[[:space:]-]CHANGE|[A-Za-z][A-Za-z0-9-]*)([[:space:]]+)# ]]; then
+    MALFORMED_TOKEN="${BASH_REMATCH[1]}"
+    gap="${BASH_REMATCH[2]}"
+    is_footer_token "$MALFORMED_TOKEN" || return 1
 
-  MALFORMED_VALUE="${rest#"${rest%%[![:space:]]*}"}"
-  return 0
+    [[ $gap == ' ' ]] && return 1
+    MALFORMED_FIX="${MALFORMED_TOKEN} #${line#*#}"
+    return 0
+  fi
+
+  return 1
+}
+
+# A line nobody could mistake for prose: the breaking-change token, a dashed
+# token, or one this repo already knows.
+is_footer_token() {
+  [[ $1 == BREAKING* || $1 == *-* ]] || is_known_footer_token "$1"
 }
 
 check_footer_separators() {
@@ -894,10 +908,10 @@ check_footer_separators() {
   for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
     has_malformed_separator "${LINES[idx]}" || continue
 
-    error footer "footer \"${MALFORMED_TOKEN}\" is not followed by \": \"" \
+    error footer "footer \"${MALFORMED_TOKEN}\" is not followed by \": \" or \" #\"" \
       --at $((idx + 1)) 1 $((${#MALFORMED_TOKEN} + 1)) \
-      --why 'the separator is exactly ": " or " #" (§9); git stops reading a trailer block at anything else, tabs included' \
-      --fix "write \"${MALFORMED_TOKEN}: ${MALFORMED_VALUE}\""
+      --why 'those two separators are the whole of §9; git stops reading a trailer block at anything else, tabs and doubled spaces included' \
+      --fix "write \"${MALFORMED_FIX}\""
   done
 }
 
@@ -925,10 +939,11 @@ check_breaking_change() {
     # prose such as "Breaking changes are listed below." is left alone.
     # One or more separators, so that "BREAKING  CHANGE:" is caught here and
     # reported rather than falling past every footer check as prose.
-    [[ $lowercase =~ ^breaking[[:space:]-]+change[[:space:]]*(:|$) ]] || continue
+    [[ $lowercase =~ ^breaking[[:space:]-]+change([[:space:]]*:|[[:space:]]+#|$) ]] || continue
 
     line_no=$((idx + 1))
     token="${line%%:*}"
+    [[ $line == *:* ]] || token="${line%%[[:space:]]#*}"
 
     if [[ ${line^^} == 'BREAKING CHANGE'* || ${line^^} == 'BREAKING-CHANGE'* ]] &&
        [[ $line != 'BREAKING CHANGE'* && $line != 'BREAKING-CHANGE'* ]]; then
@@ -943,7 +958,7 @@ check_breaking_change() {
         --why 'the token is exactly "BREAKING CHANGE" or "BREAKING-CHANGE" — one space or one hyphen, and no parser matches anything else' \
         --fix 'write "BREAKING CHANGE: <description>"'
 
-    elif [[ ! $line =~ ^BREAKING[[:space:]-]CHANGE:[[:space:]]*[^[:space:]] ]]; then
+    elif [[ ! $line =~ ^BREAKING[[:space:]-]CHANGE(:|[[:space:]]+#)[[:space:]]*[^[:space:]] ]]; then
       error footer 'BREAKING CHANGE footer has no description' \
         --at "$line_no" 1 "${#line}" \
         --why 'the token MUST be followed by a colon, a space and a description' \
@@ -979,7 +994,7 @@ check_footer_tokens() {
     line="${LINES[idx]}"
     # Breaking-change lines are check_breaking_change's business, whatever
     # case they are written in; reporting them twice helps nobody.
-    [[ ${line,,} =~ ^breaking[[:space:]-]change[[:space:]]*(:|$) ]] && continue
+    [[ ${line,,} =~ ^breaking[[:space:]-]+change([[:space:]]*:|[[:space:]]+#|$) ]] && continue
     [[ $line =~ ^([A-Za-z][A-Za-z0-9]*([[:space:]]+[A-Za-z0-9]+)+)(:|[[:space:]]#) ]] || continue
 
     token="${BASH_REMATCH[1]}"
@@ -1201,26 +1216,61 @@ print_quoted_line() {
   indent="$(blank_out "${text:0:col - 1}")"
   carets="$(blank_out "${text:col - 1:width}")"
 
+  # A span that is nothing but a tab would print no caret at all. Put one in
+  # front of each tab and keep the tab, so there is something to see and the
+  # rows still meet at the same tab stop.
+  carets="${carets// /^}"
+  carets="${carets//$'\t'/^$'\t'}"
+
   printf '     %s│%s %s%s%s%s\n' \
-    "$DIM" "$OFF" "$indent" "$RED" "${carets// /^}" "$OFF" >&2
+    "$DIM" "$OFF" "$indent" "$RED" "$carets" "$OFF" >&2
 }
 
 # $1 with every character replaced by as many spaces as it occupies on screen,
 # and every tab kept, so that the terminal's own tab stops line the two rows up.
 blank_out() {
-  local text="$1" out='' idx char code
+  local text="$1" out='' idx char code next joined=0 pending_flag=0
 
   for ((idx = 0; idx < ${#text}; idx++)); do
     char="${text:idx:1}"
     if [[ $char == $'\t' ]]; then
       out+=$'\t'
+      joined=0 pending_flag=0
       continue
     fi
     printf -v code '%d' "'$char"
-    if is_wide "$code"; then
+
+    # A zero-width joiner glues what follows onto the emoji before it, and the
+    # whole cluster — "👨‍👩‍👧‍👦" is four of them — occupies one pair of cells.
+    if ((code == 0x200D)); then
+      joined=1
+      continue
+    fi
+    # Skin tone, variation selectors, combining marks, the enclosing keycap:
+    # all of them modify the character before rather than taking a cell.
+    if is_zero_width "$code" || ((code >= 0x1F3FB && code <= 0x1F3FF)); then
+      continue
+    fi
+    if ((joined)); then
+      joined=0
+      continue
+    fi
+    # Two regional indicators make one flag, two cells wide between them.
+    if ((code >= 0x1F1E6 && code <= 0x1F1FF)); then
+      ((pending_flag)) && { pending_flag=0; continue; }
+      pending_flag=1
       out+='  '
-    elif is_zero_width "$code"; then
-      :
+      continue
+    fi
+    pending_flag=0
+
+    # U+FE0F asks for the emoji presentation of the character before it, and
+    # that is two cells wide even where the bare character is one — "1️⃣", "⚠️".
+    next=0
+    ((idx + 1 < ${#text})) && printf -v next '%d' "'${text:idx + 1:1}"
+
+    if is_wide "$code" || ((next == 0xFE0F)); then
+      out+='  '
     else
       out+=' '
     fi
@@ -1310,10 +1360,10 @@ is_wide() {
 # cell of their own.
 is_zero_width() {
   local code="$1"
-  ((code >= 0x0300 && code <= 0x036F)) ||
-    ((code >= 0x200B && code <= 0x200F)) ||
-    ((code == 0xFE0F)) ||
-    ((code >= 0xFE00 && code <= 0xFE0E))
+  ((code >= 0x0300 && code <= 0x036F)) ||   # combining diacritics
+    ((code >= 0x200B && code <= 0x200F)) || # zero-width and direction marks
+    ((code >= 0x20D0 && code <= 0x20FF)) || # combining marks, enclosing keycap
+    ((code >= 0xFE00 && code <= 0xFE0F))    # variation selectors
 }
 
 print_reference() {
