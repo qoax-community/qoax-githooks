@@ -217,6 +217,14 @@ read_message() {
   local msg_file="$1" line first_raw
   local -a raw=() body=()
 
+  # In report-only mode the message belongs to a commit that already exists, so
+  # git cleaned it once already. Cleaning it a second time would delete real
+  # content: "#note" is a comment while the message sits in an editor buffer,
+  # but ordinary text once it is stored. For the same reason nothing below a
+  # scissors line can be git's own any more.
+  local stored=0
+  [[ -n ${COMMIT_MSG_REPORT_ONLY-} ]] && stored=1
+
   while IFS= read -r line || [[ -n $line ]]; do
     raw+=("${line%$'\r'}")
   done <"$msg_file"
@@ -226,18 +234,23 @@ read_message() {
   # message content that only the scissors mode removes, so verbatim keeps it
   # and so must the hook. Tell them apart by whether a diff follows.
   local idx cut=-1 marker=-1
-  for ((idx = 0; idx < ${#raw[@]}; idx++)); do
-    if [[ ${raw[idx]} =~ ^[^[:alnum:][:space:]][[:space:]]*-{2,}[[:space:]]*\>8[[:space:]]*-{2,} ]]; then
-      marker=$idx
-      break
-    fi
-  done
+  if ((stored == 0)); then
+    for ((idx = 0; idx < ${#raw[@]}; idx++)); do
+      if [[ ${raw[idx]} =~ ^[^[:alnum:][:space:]][[:space:]]*-{2,}[[:space:]]*\>8[[:space:]]*-{2,} ]]; then
+        marker=$idx
+        break
+      fi
+    done
+  fi
   if ((marker >= 0)); then
     if [[ $CLEANUP_MODE == scissors ]]; then
       cut=$marker
     else
+      # Only the header that opens a diff, and nothing that merely looks like
+      # one line of it: "--- old behaviour" under a scissors line somebody
+      # typed is prose, and prose still has to be checked.
       for ((idx = marker + 1; idx < ${#raw[@]}; idx++)); do
-        if [[ ${raw[idx]} =~ ^(diff\ --git\ |index\ |---\ |\+\+\+\ |@@\ ) ]]; then
+        if [[ ${raw[idx]} == 'diff --git '* ]]; then
           cut=$marker
           break
         fi
@@ -252,7 +265,9 @@ read_message() {
 
   LINES=()
   if ((${#body[@]})); then
-    case "$CLEANUP_MODE" in
+    local mode="$CLEANUP_MODE"
+    ((stored)) && mode=verbatim
+    case "$mode" in
       verbatim)
         # Nothing is cleaned, not even the blank lines around the message.
         mapfile -t LINES < <(printf '%s\n' "${body[@]}")
@@ -647,6 +662,9 @@ check_description() {
 check_imperative_mood() {
   local desc="$1" col="$2"
   local first_word="${desc%%[ ,:;]*}"
+  # A description opening with one of those delimiters has no first word, and
+  # an empty subscript is a bash error rather than a lookup that finds nothing.
+  [[ -n $first_word ]] || return 0
   local rest="${desc#"$first_word"}"
   local lowercase="${first_word,,}"
 
@@ -955,7 +973,7 @@ check_no_ai_attribution() {
       continue
 
     if [[ $lowercase =~ ^co-authored-by:.*$agents ]] ||
-       [[ $lowercase =~ (generated[[:space:]-]with|created[[:space:]-]by).*$agents ]] ||
+       [[ $lowercase =~ (generated|created|authored|written)[[:space:]-](with|by).*$agents ]] ||
        [[ $line == *🤖* ]]; then
       error footer 'AI agent attribution trailer' \
         --at $((idx + 1)) 1 "${#line}" \

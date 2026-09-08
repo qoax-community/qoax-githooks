@@ -113,9 +113,10 @@ jobs:
           fi
 
           if [ "$failures" -gt 0 ]; then
-            printf '\n%s message(s) do not follow Conventional Commits v1.0.0.\n' "$failures" >&2
+            printf "\n%s message(s) do not follow this repository's commit\n" "$failures" >&2
+            printf 'conventions: Conventional Commits v1.0.0 plus the house rules above.\n' >&2
             printf 'Rewrite them with `git rebase -i` (or edit the pull request title) and push again.\n' >&2
             exit 1
           fi
 
-          printf 'All checked messages follow Conventional Commits v1.0.0.\n'
+          printf "All checked messages follow this repository's commit conventions.\n"
