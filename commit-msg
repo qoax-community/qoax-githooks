@@ -111,6 +111,7 @@ TYPES=()
 SUBJECT_MAX=72
 BODY_MAX=100
 CLEANUP_MODE=default
+COMMENT_CHAR=''       # core.commentChar when it is one character, else empty
 
 # The cleaned-up commit message, one line per element, filled in by read_message.
 LINES=()
@@ -194,6 +195,12 @@ load_config() {
   configured="$(git config --get commitMsg.bodyMax || true)"
   [[ $configured =~ ^[0-9]+$ ]] && BODY_MAX=$((10#$configured))
 
+  # Which character opens a comment, and so which line is git's scissors line.
+  # "auto" leaves this empty: git resolves it against the message, and a hook
+  # cannot repeat that reliably.
+  configured="$(git config --get core.commentChar || true)"
+  [[ ${#configured} == 1 ]] && COMMENT_CHAR="$configured"
+
   # Which cleanup git will apply decides what counts as a comment, and whether
   # blank lines and trailing whitespace survive into the commit.
   configured="$(git config --get commit.cleanup || true)"
@@ -218,11 +225,21 @@ setup_colours() {
 # run the message through git's own: that is what decides whether a "#" line is
 # a comment (core.commentChar, including "auto", which a hook cannot resolve by
 # itself) and whether blank lines and trailing whitespace survive.
-# The line git writes above the diff it appends. core.commentChar may be any
-# single ASCII character, letters and digits included, so the marker is judged
-# by its shape rather than by what opens it.
+# The line git writes above the diff it appends, and the only line it cuts at:
+# the comment character, then this exactly. A shorter rule of dashes, or the
+# same rule with anything after it, git keeps — so the hook keeps it too.
+readonly SCISSORS_RULE=' ------------------------ >8 ------------------------'
+
 is_scissors_marker() {
-  [[ $1 =~ ^[^[:space:]][[:space:]]*-{2,}[[:space:]]*\>8[[:space:]]*-{2,} ]]
+  # git strips trailing whitespace before it compares.
+  local line="${1%"${1##*[![:space:]]}"}"
+
+  [[ $line == ?"$SCISSORS_RULE" ]] || return 1
+
+  # With core.commentChar=auto a hook cannot know which character git settled
+  # on, so any non-whitespace opener counts. When it is configured, only that.
+  [[ -n $COMMENT_CHAR ]] && { [[ ${line:0:1} == "$COMMENT_CHAR" ]]; return; }
+  [[ ${line:0:1} != [[:space:]] ]]
 }
 
 read_message() {
@@ -906,10 +923,25 @@ is_footer_token() {
 }
 
 check_footer_separators() {
-  local idx
+  local idx line token
 
   for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
-    has_malformed_separator "${LINES[idx]}" || continue
+    line="${LINES[idx]}"
+
+    # A token and a colon and nothing else. The breaking-change token has its
+    # own finding for this, and says more about what belongs there.
+    if [[ $line =~ ^([A-Za-z][A-Za-z0-9-]*):[[:space:]]*$ ]]; then
+      token="${BASH_REMATCH[1]}"
+      if is_footer_token "$token" && [[ ${token^^} != BREAKING* ]]; then
+        error footer "footer \"${token}\" has no value" \
+          --at $((idx + 1)) 1 "${#line}" \
+          --why 'a footer is a token, a separator and a value (§9); with nothing after the colon there is no trailer for a parser to read' \
+          --fix "write \"${token}: <value>\", or delete the line"
+        continue
+      fi
+    fi
+
+    has_malformed_separator "$line" || continue
 
     error footer "footer \"${MALFORMED_TOKEN}\" is not followed by \": \" or \" #\"" \
       --at $((idx + 1)) 1 $((${#MALFORMED_TOKEN} + 1)) \
@@ -1094,6 +1126,8 @@ is_agent_coauthor() {
 # not an attribution.
 check_no_ai_attribution() {
   local agents='(claude|anthropic|copilot|chatgpt|gpt-|cursor|codex|bot@)'
+  # The generic label, bounded so that "maintainer" and "Ai Tanaka" are not it.
+  local generic='[^a-z]ai([^a-z]|$)'
   local idx line lowercase
 
   # Every line after the subject, not just the closing block: body text after
@@ -1109,14 +1143,14 @@ check_no_ai_attribution() {
     looks_like_footer "$line" ||
       has_malformed_separator "$line" ||
       [[ $line == 🤖* ]] ||
-      [[ $line =~ ^[A-Za-z][A-Za-z0-9]*([[:space:]]+[A-Za-z0-9]+)*:[[:space:]] ]] ||
+      [[ $line =~ ^[A-Za-z][A-Za-z0-9]*([[:space:]]+[A-Za-z0-9]+)*: ]] ||
       continue
 
     # A co-author is judged on its own terms — the phrase test below would
     # match every "co-authored-by" line whose person shares a name with a tool.
     if [[ $lowercase == co-authored-by:* ]]; then
       is_agent_coauthor "$line" || continue
-    elif [[ ! $lowercase =~ (generated|created|authored|written|assisted)[[:space:]-]+(with|by).*$agents ]] &&
+    elif [[ ! $lowercase =~ (generated|created|authored|written|assisted)[[:space:]-]+(with|by).*($agents|$generic) ]] &&
          [[ $line != *🤖* ]]; then
       continue
     fi
@@ -1222,6 +1256,10 @@ print_quoted_line() {
   # A span that is nothing but a tab would print no caret at all. Put one in
   # front of each tab and keep the tab, so there is something to see and the
   # rows still meet at the same tab stop.
+  # A finding may point just past the end of the line — a missing description
+  # sits where the next character would be — and there is no text to space out.
+  # Show the insertion point rather than nothing.
+  [[ -n $carets ]] || carets=' '
   carets="${carets// /^}"
   carets="${carets//$'\t'/^$'\t'}"
 

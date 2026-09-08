@@ -82,7 +82,10 @@ jobs:
             # compare against. Everything it carries would mean the whole
             # history, which predates this convention, so check the tip and say
             # plainly that the rest went unchecked rather than implying it did.
-            range="${PUSH_AFTER}~1..${PUSH_AFTER}"
+            # "<rev>^!" is that commit and nothing it descends from, which
+            # works for a root commit and does not drag in a merge's second
+            # parent the way "<rev>~1.." would.
+            range="${PUSH_AFTER}^!"
             printf '::notice::branch created by this push — only its tip commit is checked\n'
           fi
 
