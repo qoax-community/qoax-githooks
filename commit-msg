@@ -633,7 +633,18 @@ check_type() {
 check_scope() {
   ((SUBJECT_HAS_SCOPE)) || return 0
 
-  local col=$((${#SUBJECT_TYPE} + 2))
+  # The scope is parsed out of a prefix with its whitespace removed, so its
+  # column has to come from the subject as written: past the opening paren,
+  # then past any space somebody left after it.
+  local before="${SUBJECT_PREFIX%%(*}" inner="${SUBJECT_PREFIX#*(}"
+  inner="${inner%%)*}"
+  local lead="${inner%%[![:space:]]*}"
+  [[ $inner == *[![:space:]]* ]] || lead="$inner"
+  local written
+  written="$(trim "$inner")"
+
+  local col=$((${#before} + 2 + ${#lead}))
+  local width=${#written}
 
   if [[ -z $SUBJECT_SCOPE ]]; then
     # The parentheses themselves are the problem, and they start one column
@@ -645,7 +656,7 @@ check_scope() {
 
   elif [[ ! $SUBJECT_SCOPE =~ ^[a-z0-9]+([-_./,][a-z0-9]+)*$ ]]; then
     error subject "unusual scope \"${SUBJECT_SCOPE}\"" \
-      --at 1 "$col" "${#SUBJECT_SCOPE}" \
+      --at 1 "$col" "$width" \
       --why 'the spec only asks for a noun in parentheses (§4); this repo requires lowercase scopes' \
       --fix 'e.g. (auth), (api/routes), (legal.terms)'
 
@@ -919,14 +930,14 @@ check_breaking_change() {
     line_no=$((idx + 1))
     token="${line%%:*}"
 
-    if [[ ${line^^} =~ ^BREAKING[[:space:]-]CHANGE && \
-          $line != 'BREAKING CHANGE'* && $line != 'BREAKING-CHANGE'* ]]; then
+    if [[ ${line^^} == 'BREAKING CHANGE'* || ${line^^} == 'BREAKING-CHANGE'* ]] &&
+       [[ $line != 'BREAKING CHANGE'* && $line != 'BREAKING-CHANGE'* ]]; then
       error footer "\"${token}\" must be uppercase" \
         --at "$line_no" 1 "${#token}" \
         --why 'BREAKING CHANGE is the one token the spec treats as case-sensitive; BREAKING-CHANGE is a synonym' \
         --fix 'write "BREAKING CHANGE: <description>"'
 
-    elif [[ ! $line =~ ^BREAKING[[:space:]-]CHANGE ]]; then
+    elif [[ $line != 'BREAKING CHANGE'* && $line != 'BREAKING-CHANGE'* ]]; then
       error footer "\"${token}\" is not the BREAKING CHANGE token" \
         --at "$line_no" 1 "${#token}" \
         --why 'the token is exactly "BREAKING CHANGE" or "BREAKING-CHANGE" — one space or one hyphen, and no parser matches anything else' \
@@ -1078,6 +1089,7 @@ check_no_ai_attribution() {
     # written with spaces in the token — "Generated with: Copilot" is still an
     # attribution, however malformed. Prose that names a tool is just prose.
     looks_like_footer "$line" ||
+      has_malformed_separator "$line" ||
       [[ $line == 🤖* ]] ||
       [[ $line =~ ^[A-Za-z][A-Za-z0-9]*([[:space:]]+[A-Za-z0-9]+)*:[[:space:]] ]] ||
       continue
@@ -1086,7 +1098,7 @@ check_no_ai_attribution() {
     # match every "co-authored-by" line whose person shares a name with a tool.
     if [[ $lowercase == co-authored-by:* ]]; then
       is_agent_coauthor "$line" || continue
-    elif [[ ! $lowercase =~ (generated|created|authored|written|assisted)[[:space:]-](with|by).*$agents ]] &&
+    elif [[ ! $lowercase =~ (generated|created|authored|written|assisted)[[:space:]-]+(with|by).*$agents ]] &&
          [[ $line != *🤖* ]]; then
       continue
     fi
@@ -1217,24 +1229,81 @@ blank_out() {
   printf '%s' "$out"
 }
 
-# The double-width ranges of Unicode's East Asian Width property that a commit
-# message realistically carries: Hangul, CJK, fullwidth forms, and emoji.
+# The East Asian Width "wide" and "fullwidth" ranges a commit message
+# realistically carries: Hangul, CJK, fullwidth forms, and the emoji blocks.
+# Pairs of bounds, read two at a time — easier to extend than a chain of tests.
+readonly WIDE_RANGES=(
+  0x1100  0x115F    # Hangul Jamo
+  0x231A  0x231B    # watch, hourglass
+  0x2329  0x232A    # angle brackets
+  0x23E9  0x23EC    # media buttons
+  0x23F0  0x23F0    # alarm clock
+  0x23F3  0x23F3    # hourglass flowing
+  0x25FD  0x25FE    # small squares
+  0x2614  0x2615    # umbrella, hot beverage
+  0x2648  0x2653    # zodiac
+  0x267F  0x267F    # wheelchair
+  0x2693  0x2693    # anchor
+  0x26A1  0x26A1    # high voltage
+  0x26AA  0x26AB    # circles
+  0x26BD  0x26BE    # ball games
+  0x26C4  0x26C5    # snowman, sun behind cloud
+  0x26CE  0x26CE    # ophiuchus
+  0x26D4  0x26D4    # no entry
+  0x26EA  0x26EA    # church
+  0x26F2  0x26F3    # fountain, golf
+  0x26F5  0x26F5    # sailboat
+  0x26FA  0x26FA    # tent
+  0x26FD  0x26FD    # fuel pump
+  0x2705  0x2705    # check mark button
+  0x270A  0x270B    # hands
+  0x2728  0x2728    # sparkles
+  0x274C  0x274C    # cross mark
+  0x274E  0x274E    # cross mark button
+  0x2753  0x2755    # question and exclamation marks
+  0x2757  0x2757    # red exclamation
+  0x2795  0x2797    # maths signs
+  0x27B0  0x27B0    # curly loop
+  0x27BF  0x27BF    # double curly loop
+  0x2B1B  0x2B1C    # large squares
+  0x2B50  0x2B50    # star
+  0x2B55  0x2B55    # hollow red circle
+  0x2E80  0x303E    # CJK radicals, Kangxi, CJK symbols
+  0x3041  0x33FF    # kana through CJK compatibility
+  0x3400  0x4DBF    # CJK extension A
+  0x4E00  0x9FFF    # CJK unified ideographs
+  0xA000  0xA4CF    # Yi
+  0xAC00  0xD7A3    # Hangul syllables
+  0xF900  0xFAFF    # CJK compatibility ideographs
+  0xFE30  0xFE6F    # CJK compatibility forms, small forms
+  0xFF00  0xFF60    # fullwidth forms
+  0xFFE0  0xFFE6    # fullwidth signs
+  0x16FE0 0x16FE4   # Tangut, Nushu components
+  0x17000 0x18AFF   # Tangut, Khitan
+  0x1B000 0x1B2FF   # kana supplement and extended
+  0x1F004 0x1F004   # mahjong red dragon
+  0x1F0CF 0x1F0CF   # joker
+  0x1F18E 0x1F18E   # AB button
+  0x1F191 0x1F19A   # squared latin
+  0x1F200 0x1F2FF   # enclosed ideographic supplement
+  0x1F300 0x1F64F   # misc symbols and pictographs, emoticons
+  0x1F680 0x1F6FF   # transport and map symbols
+  0x1F7E0 0x1F7EB   # geometric shapes extended
+  0x1F900 0x1F9FF   # supplemental symbols and pictographs
+  0x1FA70 0x1FAFF   # symbols and pictographs extended-A
+  0x20000 0x3FFFD   # CJK extensions B and beyond
+)
+
 is_wide() {
-  local code="$1"
-  ((code >= 0x1100 && code <= 0x115F)) ||
-    ((code >= 0x2E80 && code <= 0x303E)) ||
-    ((code >= 0x3041 && code <= 0x33FF)) ||
-    ((code >= 0x3400 && code <= 0x4DBF)) ||
-    ((code >= 0x4E00 && code <= 0x9FFF)) ||
-    ((code >= 0xA000 && code <= 0xA4CF)) ||
-    ((code >= 0xAC00 && code <= 0xD7A3)) ||
-    ((code >= 0xF900 && code <= 0xFAFF)) ||
-    ((code >= 0xFE30 && code <= 0xFE6F)) ||
-    ((code >= 0xFF00 && code <= 0xFF60)) ||
-    ((code >= 0xFFE0 && code <= 0xFFE6)) ||
-    ((code >= 0x1F300 && code <= 0x1F64F)) ||
-    ((code >= 0x1F900 && code <= 0x1F9FF)) ||
-    ((code >= 0x20000 && code <= 0x3FFFD))
+  local code="$1" idx
+  # Everything a message is usually made of is one cell wide; leave early
+  # rather than walking the table for each of them.
+  ((code < 0x1100)) && return 1
+
+  for ((idx = 0; idx < ${#WIDE_RANGES[@]}; idx += 2)); do
+    ((code >= WIDE_RANGES[idx] && code <= WIDE_RANGES[idx + 1])) && return 0
+  done
+  return 1
 }
 
 # Combining marks and the joiners that glue an emoji sequence together take no

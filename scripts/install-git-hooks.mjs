@@ -34,10 +34,12 @@ if (configured === HOOKS_PATH) {
 }
 
 // Someone with their own hooks directory made a deliberate choice; say what
-// that costs them rather than overwriting it.
-if (configured) {
+// that costs them rather than overwriting it. `null` is the only "not set"
+// answer — an empty string is a value somebody wrote, and it disables hooks.
+if (configured !== null) {
+  const shown = configured === '' ? 'an empty value' : `"${configured}"`;
   console.warn(
-    `! core.hooksPath is set to "${configured}", leaving it alone.\n` +
+    `! core.hooksPath is set to ${shown}, leaving it alone.\n` +
       `  commit message validation is off — run \`git config core.hooksPath ${HOOKS_PATH}\` to enable it.`,
   );
   process.exit(0);
