@@ -20,6 +20,11 @@
 # Set COMMIT_MSG_REPORT_ONLY=1 when running it outside a commit (CI checking
 # an existing message), so the report drops the "commit aborted" wording.
 #
+# A hook sees git's config, never git's command line, so a per-invocation
+# --cleanup=<mode> is invisible here and commit.cleanup is taken as the truth.
+# Under "git commit --cleanup=verbatim" with the config unset, a "#" line is
+# judged as a comment and then stored as text; set commit.cleanup to match.
+#
 # Optional overrides (git config):
 #   commitMsg.types         space separated list of allowed types
 #   commitMsg.subjectMax    max subject length      (default 72)
@@ -236,7 +241,9 @@ read_message() {
   local idx cut=-1 marker=-1
   if ((stored == 0)); then
     for ((idx = 0; idx < ${#raw[@]}; idx++)); do
-      if [[ ${raw[idx]} =~ ^[^[:alnum:][:space:]][[:space:]]*-{2,}[[:space:]]*\>8[[:space:]]*-{2,} ]]; then
+      # core.commentChar may be any single ASCII character, letters and
+      # digits included, so the marker is judged by its shape, not its opener.
+      if [[ ${raw[idx]} =~ ^[^[:space:]][[:space:]]*-{2,}[[:space:]]*\>8[[:space:]]*-{2,} ]]; then
         marker=$idx
         break
       fi
@@ -377,6 +384,8 @@ SUBJECT_HAS_SCOPE=0
 SUBJECT_DESC=''
 SUBJECT_DESC_COL=0    # column of the first description character, 1-based
 SUBJECT_COL_OFFSET=0  # leading whitespace the subject columns are measured past
+MALFORMED_TOKEN=''    # footer token whose separator has already been reported
+MALFORMED_VALUE=''    # what followed that token, with the bad separator gone
 
 check_subject() {
   local raw="${LINES[0]}"
@@ -664,7 +673,9 @@ check_description() {
 
   check_imperative_mood "$desc" "$col"
 
-  if [[ ${desc,,} =~ (^|[^a-z])(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)[[:space:]]+#[0-9]+ ]]; then
+  local closing='(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)'
+  local reference='([a-z0-9._/-]*#[0-9]+|https?://[^[:space:]]+/issues/[0-9]+)'
+  if [[ ${desc,,} =~ (^|[^a-z])${closing}[[:space:]]+${reference} ]]; then
     error subject 'issue-closing keyword in the subject line' \
       --at 1 "$col" "${#desc}" \
       --why 'GitHub and GitLab read closing keywords from the footer, and the subject stays short without them' \
@@ -720,7 +731,7 @@ check_body_line_length() {
     ((${#line} > BODY_MAX)) || continue
     # A single long token — a URL, a path, a hash — has nowhere to wrap. Prose
     # that merely mentions one does.
-    [[ $(trim "$line") == *' '* ]] || continue
+    [[ $(trim "$line") =~ [[:space:]] ]] || continue
 
     error body "line $((idx + 1)) is ${#line} characters (max ${BODY_MAX})" \
       --at $((idx + 1)) $((BODY_MAX + 1)) $((${#line} - BODY_MAX)) \
@@ -769,6 +780,7 @@ check_footers() {
   footer_start="$(find_footer_start)"
 
   check_breaking_change "$footer_start"
+  check_footer_separators
   check_footer_tokens "$footer_start"
   check_footers_in_body "$footer_start"
   check_no_ai_attribution
@@ -834,8 +846,48 @@ paragraph_start_of() {
 looks_like_footer() {
   # The token and its delimiter, not a line that merely starts with the same
   # letters: "BREAKING CHANGES are documented below" is a sentence.
-  [[ $1 =~ ^[A-Za-z][A-Za-z0-9-]*(:[[:space:]]|[[:space:]]#) ]] ||
+  # The separator is exactly ": " or " #" (§9) — a tab in its place is not a
+  # footer to git, and check_footer_separators says so in as many words.
+  [[ $1 =~ ^[A-Za-z][A-Za-z0-9-]*(:\ |\ #) ]] ||
     [[ $1 =~ ^BREAKING[[:space:]-]CHANGE([[:space:]]*:|$) ]]
+}
+
+# What stands between a footer token and its value. A tab reads like a space in
+# every editor and stops git's trailer parser dead, so a line that is plainly
+# meant as a footer is told, rather than quietly demoted to prose.
+# True when $1 is plainly meant as a footer but the colon is followed by
+# something other than a space. Sets MALFORMED_TOKEN and MALFORMED_VALUE.
+# Every other footer check skips such a line, so it is reported once.
+has_malformed_separator() {
+  local line="$1" rest
+
+  [[ $line =~ ^(BREAKING[[:space:]-]CHANGE|[A-Za-z][A-Za-z0-9-]*): ]] || return 1
+  MALFORMED_TOKEN="${BASH_REMATCH[1]}"
+
+  # Only for a line nobody could mistake for prose: the breaking-change token,
+  # a dashed token, or one this repo already knows.
+  [[ $MALFORMED_TOKEN == BREAKING* || $MALFORMED_TOKEN == *-* ]] ||
+    is_known_footer_token "$MALFORMED_TOKEN" || return 1
+
+  rest="${line#*:}"
+  # A bare token line is check_breaking_change's business, not this one.
+  [[ -z $rest || $rest == ' '* ]] && return 1
+
+  MALFORMED_VALUE="${rest#"${rest%%[![:space:]]*}"}"
+  return 0
+}
+
+check_footer_separators() {
+  local idx
+
+  for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
+    has_malformed_separator "${LINES[idx]}" || continue
+
+    error footer "footer \"${MALFORMED_TOKEN}\" is not followed by \": \"" \
+      --at $((idx + 1)) 1 $((${#MALFORMED_TOKEN} + 1)) \
+      --why 'the separator is exactly ": " or " #" (§9); git stops reading a trailer block at anything else, tabs included' \
+      --fix "write \"${MALFORMED_TOKEN}: ${MALFORMED_VALUE}\""
+  done
 }
 
 # A final paragraph is only a footer block when a line in it really does parse
@@ -880,7 +932,7 @@ check_breaking_change() {
         --why 'the token is exactly "BREAKING CHANGE" or "BREAKING-CHANGE" — one space or one hyphen, and no parser matches anything else' \
         --fix 'write "BREAKING CHANGE: <description>"'
 
-    elif [[ ! $line =~ ^BREAKING[[:space:]-]CHANGE:[[:space:]].+ ]]; then
+    elif [[ ! $line =~ ^BREAKING[[:space:]-]CHANGE:[[:space:]]*[^[:space:]] ]]; then
       error footer 'BREAKING CHANGE footer has no description' \
         --at "$line_no" 1 "${#line}" \
         --why 'the token MUST be followed by a colon, a space and a description' \
@@ -917,7 +969,7 @@ check_footer_tokens() {
     # Breaking-change lines are check_breaking_change's business, whatever
     # case they are written in; reporting them twice helps nobody.
     [[ ${line,,} =~ ^breaking[[:space:]-]change[[:space:]]*(:|$) ]] && continue
-    [[ $line =~ ^([A-Za-z][A-Za-z0-9]*([[:space:]]+[A-Za-z0-9]+)+)(:[[:space:]]|[[:space:]]#) ]] || continue
+    [[ $line =~ ^([A-Za-z][A-Za-z0-9]*([[:space:]]+[A-Za-z0-9]+)+)(:|[[:space:]]#) ]] || continue
 
     token="${BASH_REMATCH[1]}"
     # Alongside a well-formed footer this is a malformed one, because the whole
@@ -949,6 +1001,9 @@ check_footers_in_body() {
 
   for ((idx = 2; idx < scan_end; idx++)); do
     line="${LINES[idx]}"
+    # One finding per line: a bad separator has already been reported, and it
+    # is why this line does not read as a footer in the first place.
+    has_malformed_separator "$line" && continue
     # A paragraph of its own is no defence: "Refs: #1" with body text below it
     # is still stranded ahead of the footer block. The paragraphs that stack
     # legitimately are already past scan_end, because find_footer_start counts
@@ -975,6 +1030,36 @@ check_footers_in_body() {
   done
 }
 
+# A co-author trailer names a person, and people are called Claude Shannon and
+# Cursor and Bing. So the tool names alone decide nothing here: what marks a
+# co-author as a machine is a bot address, a bot marker, or a display name that
+# is nothing but the tool's own.
+is_agent_coauthor() {
+  local line="$1" name address
+
+  [[ ${line,,} =~ ^co-authored-by:[[:space:]]*(.*)$ ]] || return 1
+  name="${BASH_REMATCH[1]}"
+
+  # GitHub's own marker, on the login and in the address it generates.
+  [[ $name == *'[bot]'* ]] && return 0
+
+  address=''
+  [[ $name =~ \<([^\>]*)\> ]] && address="${BASH_REMATCH[1]}"
+  name="${name%%<*}"
+  name="$(trim "$name")"
+
+  # The vendors' own domains, and the numeric no-reply address GitHub mints for
+  # an app — "175728472+copilot@users.noreply.github.com".
+  [[ $address =~ @(anthropic|openai)\.com$ ]] && return 0
+  [[ $address =~ ^[0-9]+\+(claude|copilot|chatgpt|codex|cursor)@ ]] && return 0
+
+  # A bare tool name and nothing else. "Claude Shannon" is a person.
+  case "$name" in
+    claude|copilot|'github copilot'|'claude code'|chatgpt|codex|cursor) return 0 ;;
+  esac
+  return 1
+}
+
 # This repo attributes commits to their human author only. Scoped to the footer
 # block, where trailers live: body prose that merely mentions a tool by name is
 # not an attribution.
@@ -997,14 +1082,19 @@ check_no_ai_attribution() {
       [[ $line =~ ^[A-Za-z][A-Za-z0-9]*([[:space:]]+[A-Za-z0-9]+)*:[[:space:]] ]] ||
       continue
 
-    if [[ $lowercase =~ ^co-authored-by:.*$agents ]] ||
-       [[ $lowercase =~ (generated|created|authored|written|assisted)[[:space:]-](with|by).*$agents ]] ||
-       [[ $line == *🤖* ]]; then
-      error footer 'AI agent attribution trailer' \
-        --at $((idx + 1)) 1 "${#line}" \
-        --why 'commits in this repo are attributed to their human author only' \
-        --fix 'delete this line'
+    # A co-author is judged on its own terms — the phrase test below would
+    # match every "co-authored-by" line whose person shares a name with a tool.
+    if [[ $lowercase == co-authored-by:* ]]; then
+      is_agent_coauthor "$line" || continue
+    elif [[ ! $lowercase =~ (generated|created|authored|written|assisted)[[:space:]-](with|by).*$agents ]] &&
+         [[ $line != *🤖* ]]; then
+      continue
     fi
+
+    error footer 'AI agent attribution trailer' \
+      --at $((idx + 1)) 1 "${#line}" \
+      --why 'commits in this repo are attributed to their human author only' \
+      --fix 'delete this line'
   done
 }
 
@@ -1091,12 +1181,70 @@ print_quoted_line() {
   ((width > ${#text})) && width=${#text}
   ((width > 0)) || width=1
 
-  local indent='' carets=''
-  ((col > 1)) && printf -v indent '%*s' $((col - 1)) ''
-  printf -v carets '%*s' "$width" ''
+  # Columns are character counts; the terminal thinks in display cells. An
+  # emoji or a CJK character earlier in the line takes two of them, and a tab
+  # takes as many as the next tab stop, so the underline is spaced out of the
+  # same text rather than out of a count.
+  local indent carets
+  indent="$(blank_out "${text:0:col - 1}")"
+  carets="$(blank_out "${text:col - 1:width}")"
 
   printf '     %s│%s %s%s%s%s\n' \
     "$DIM" "$OFF" "$indent" "$RED" "${carets// /^}" "$OFF" >&2
+}
+
+# $1 with every character replaced by as many spaces as it occupies on screen,
+# and every tab kept, so that the terminal's own tab stops line the two rows up.
+blank_out() {
+  local text="$1" out='' idx char code
+
+  for ((idx = 0; idx < ${#text}; idx++)); do
+    char="${text:idx:1}"
+    if [[ $char == $'\t' ]]; then
+      out+=$'\t'
+      continue
+    fi
+    printf -v code '%d' "'$char"
+    if is_wide "$code"; then
+      out+='  '
+    elif is_zero_width "$code"; then
+      :
+    else
+      out+=' '
+    fi
+  done
+
+  printf '%s' "$out"
+}
+
+# The double-width ranges of Unicode's East Asian Width property that a commit
+# message realistically carries: Hangul, CJK, fullwidth forms, and emoji.
+is_wide() {
+  local code="$1"
+  ((code >= 0x1100 && code <= 0x115F)) ||
+    ((code >= 0x2E80 && code <= 0x303E)) ||
+    ((code >= 0x3041 && code <= 0x33FF)) ||
+    ((code >= 0x3400 && code <= 0x4DBF)) ||
+    ((code >= 0x4E00 && code <= 0x9FFF)) ||
+    ((code >= 0xA000 && code <= 0xA4CF)) ||
+    ((code >= 0xAC00 && code <= 0xD7A3)) ||
+    ((code >= 0xF900 && code <= 0xFAFF)) ||
+    ((code >= 0xFE30 && code <= 0xFE6F)) ||
+    ((code >= 0xFF00 && code <= 0xFF60)) ||
+    ((code >= 0xFFE0 && code <= 0xFFE6)) ||
+    ((code >= 0x1F300 && code <= 0x1F64F)) ||
+    ((code >= 0x1F900 && code <= 0x1F9FF)) ||
+    ((code >= 0x20000 && code <= 0x3FFFD))
+}
+
+# Combining marks and the joiners that glue an emoji sequence together take no
+# cell of their own.
+is_zero_width() {
+  local code="$1"
+  ((code >= 0x0300 && code <= 0x036F)) ||
+    ((code >= 0x200B && code <= 0x200F)) ||
+    ((code == 0xFE0F)) ||
+    ((code >= 0xFE00 && code <= 0xFE0E))
 }
 
 print_reference() {
