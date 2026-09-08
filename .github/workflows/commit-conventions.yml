@@ -29,6 +29,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The hook's own regression suite. It runs before the messages are
+      # checked, so a hook that has stopped enforcing a rule is reported as a
+      # broken hook rather than as a branch that happens to pass.
+      - name: Test the commit-msg hook
+        run: tests/run.sh
+
       # Runs the same commit-msg contributors get locally, so the
       # rules cannot drift apart. A pull request title is checked too: with
       # squash merging it becomes the commit subject on main.
