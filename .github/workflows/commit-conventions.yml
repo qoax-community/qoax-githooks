@@ -9,8 +9,14 @@ on:
 permissions:
   contents: read
 
+# A pull request may cancel its own earlier run: the next one re-checks the
+# whole range. A push may not — it is checked over the range it pushed, so
+# cancelling it would leave those commits unchecked by anything. Give each push
+# a group of its own instead.
 concurrency:
-  group: commit-conventions-${{ github.event.pull_request.number || github.ref }}
+  group: >-
+    commit-conventions-${{ github.event.pull_request.number
+      || format('{0}@{1}', github.ref, github.sha) }}
   cancel-in-progress: true
 
 jobs:
