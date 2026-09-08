@@ -218,6 +218,13 @@ setup_colours() {
 # run the message through git's own: that is what decides whether a "#" line is
 # a comment (core.commentChar, including "auto", which a hook cannot resolve by
 # itself) and whether blank lines and trailing whitespace survive.
+# The line git writes above the diff it appends. core.commentChar may be any
+# single ASCII character, letters and digits included, so the marker is judged
+# by its shape rather than by what opens it.
+is_scissors_marker() {
+  [[ $1 =~ ^[^[:space:]][[:space:]]*-{2,}[[:space:]]*\>8[[:space:]]*-{2,} ]]
+}
+
 read_message() {
   local msg_file="$1" line first_raw
   local -a raw=() body=()
@@ -237,30 +244,23 @@ read_message() {
   # A scissors line is git's own when it introduces the diff --verbose appends,
   # and git removes that itself in every cleanup mode. One somebody typed is
   # message content that only the scissors mode removes, so verbatim keeps it
-  # and so must the hook. Tell them apart by whether a diff follows.
-  local idx cut=-1 marker=-1
+  # and so must the hook.
+  local idx cut=-1 diff_at=-1
   if ((stored == 0)); then
-    for ((idx = 0; idx < ${#raw[@]}; idx++)); do
-      # core.commentChar may be any single ASCII character, letters and
-      # digits included, so the marker is judged by its shape, not its opener.
-      if [[ ${raw[idx]} =~ ^[^[:space:]][[:space:]]*-{2,}[[:space:]]*\>8[[:space:]]*-{2,} ]]; then
-        marker=$idx
-        break
-      fi
-    done
-  fi
-  if ((marker >= 0)); then
     if [[ $CLEANUP_MODE == scissors ]]; then
-      cut=$marker
+      # This mode cuts at the first marker, whoever wrote it.
+      for ((idx = 0; idx < ${#raw[@]}; idx++)); do
+        is_scissors_marker "${raw[idx]}" && { cut=$idx; break; }
+      done
     else
-      # Only the header that opens a diff, and nothing that merely looks like
-      # one line of it: "--- old behaviour" under a scissors line somebody
-      # typed is prose, and prose still has to be checked.
-      for ((idx = marker + 1; idx < ${#raw[@]}; idx++)); do
-        if [[ ${raw[idx]} == 'diff --git '* ]]; then
-          cut=$marker
-          break
-        fi
+      # Otherwise the only marker that is git's own is the one it wrote
+      # directly above the diff — the nearest one above, not the first in the
+      # message. An earlier marker somebody typed is still their text.
+      for ((idx = 0; idx < ${#raw[@]}; idx++)); do
+        [[ ${raw[idx]} == 'diff --git '* ]] && { diff_at=$idx; break; }
+      done
+      for ((idx = diff_at - 1; idx >= 0; idx--)); do
+        is_scissors_marker "${raw[idx]}" && { cut=$idx; break; }
       done
     fi
   fi
@@ -877,7 +877,10 @@ has_malformed_separator() {
 
     rest="${line#*:}"
     # A bare token line is check_breaking_change's business, not this one.
-    [[ -z $rest || $rest == ' '* ]] && return 1
+    [[ -z $rest ]] && return 1
+    # Exactly one space, the same as the " #" form below: a run of them is a
+    # run, and "Refs:  #42" is not the separator §9 spells out.
+    [[ ${rest%%[![:space:]]*} == ' ' ]] && return 1
     MALFORMED_FIX="${MALFORMED_TOKEN}: ${rest#"${rest%%[![:space:]]*}"}"
     return 0
   fi
@@ -910,7 +913,7 @@ check_footer_separators() {
 
     error footer "footer \"${MALFORMED_TOKEN}\" is not followed by \": \" or \" #\"" \
       --at $((idx + 1)) 1 $((${#MALFORMED_TOKEN} + 1)) \
-      --why 'those two separators are the whole of §9; git stops reading a trailer block at anything else, tabs and doubled spaces included' \
+      --why 'those two separators are the whole of §9, one space and no more; git is laxer after a colon, but a run of spaces or a tab is nobody else\047s idea of a footer' \
       --fix "write \"${MALFORMED_FIX}\""
   done
 }

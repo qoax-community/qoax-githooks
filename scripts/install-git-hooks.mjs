@@ -11,13 +11,17 @@ import { execFileSync } from 'node:child_process';
 
 const HOOKS_PATH = '.githooks';
 
-/** Run git, returning trimmed stdout, or null if the command fails. */
+/**
+ * Run git, returning stdout without the newline git terminates it with, or
+ * null if the command fails. Only that newline: a configured path may end in
+ * a space, and trimming it away would read someone else's setting as ours.
+ */
 function git(...args) {
   try {
     return execFileSync('git', args, {
       stdio: ['ignore', 'pipe', 'ignore'],
       encoding: 'utf8',
-    }).trim();
+    }).replace(/\r?\n$/, '');
   } catch {
     return null;
   }
