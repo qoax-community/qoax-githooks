@@ -65,9 +65,11 @@ jobs:
             cat "$output"
             printf '::endgroup::\n'
             {
-              printf '### %s\n\n```\n' "$label"
-              cat "$output"
-              printf '```\n\n'
+              # An indented block rather than a fenced one: the hook echoes the
+              # message back, and a message may contain a fence of its own.
+              printf '### %s\n\n' "$label"
+              sed 's/^/    /' "$output"
+              printf '\n'
             } >>"$GITHUB_STEP_SUMMARY"
           }
 

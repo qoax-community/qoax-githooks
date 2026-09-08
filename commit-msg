@@ -333,15 +333,21 @@ add_finding() {
   local severity="$1" location="$2" summary="$3"
   shift 3
 
-  local line=0 col=0 width=0 why='' fix=''
+  local line=0 col=0 width=0 why='' fix='' absolute=0
   while (($#)); do
     case "$1" in
-      --at)  line="$2" col="$3" width="$4"; shift 4 ;;
-      --why) why="$2"; shift 2 ;;
-      --fix) fix="$2"; shift 2 ;;
-      *)     die "internal: unknown add_finding option '$1'" ;;
+      --at)       line="$2" col="$3" width="$4"; shift 4 ;;
+      --absolute) absolute=1; shift ;;
+      --why)      why="$2"; shift 2 ;;
+      --fix)      fix="$2"; shift 2 ;;
+      *)          die "internal: unknown add_finding option '$1'" ;;
     esac
   done
+
+  # Subject columns are worked out on the trimmed subject, so an indented
+  # subject shifts every one of them against the line the report prints.
+  # --absolute marks the few findings whose columns come from the raw line.
+  ((absolute == 0 && line == 1)) && col=$((col + SUBJECT_COL_OFFSET))
 
   FINDINGS+=("${severity}${FIELD_SEP}${location}${FIELD_SEP}${summary}${FIELD_SEP}${line}${FIELD_SEP}${col}${FIELD_SEP}${width}${FIELD_SEP}${why}${FIELD_SEP}${fix}")
 
@@ -370,13 +376,18 @@ SUBJECT_SCOPE=''
 SUBJECT_HAS_SCOPE=0
 SUBJECT_DESC=''
 SUBJECT_DESC_COL=0    # column of the first description character, 1-based
+SUBJECT_COL_OFFSET=0  # leading whitespace the subject columns are measured past
 
 check_subject() {
   local raw="${LINES[0]}"
 
+  local leading="${raw%%[![:space:]]*}"
+  [[ $raw == *[![:space:]]* ]] || leading=''
+  SUBJECT_COL_OFFSET=${#leading}
+
   if ((SUBJECT_MAY_BE_COMMENT)); then
     error subject 'a comment line stands where the subject belongs' \
-      --at 1 1 "${#raw}" \
+      --at 1 1 "${#raw}" --absolute \
       --why 'git keeps comment lines for "git commit -m" and drops them for an edited message, so this either is the subject or hides it' \
       --fix 'remove the comment line above the subject, or move your subject above it'
   fi
@@ -418,9 +429,11 @@ check_subject_indent() {
   local raw="$1"
 
   [[ $raw =~ ^[[:space:]] ]] || return 0
+  local leading="${raw%%[![:space:]]*}"
+  [[ $raw == *[![:space:]]* ]] || leading="$raw"
 
   error subject 'leading whitespace before the type' \
-    --at 1 1 1 \
+    --at 1 1 "${#leading}" --absolute \
     --why 'the type MUST be the first character of the commit message' \
     --fix 'remove the indentation'
 }
@@ -741,7 +754,7 @@ check_trailing_whitespace() {
     ((idx == 0)) && location=subject
 
     error "$location" 'trailing whitespace' \
-      --at $((idx + 1)) "$start" "$width" \
+      --at $((idx + 1)) "$start" "$width" --absolute \
       --why "git strips it under the default cleanup, --cleanup=verbatim keeps it, and this repo rejects it either way" \
       --fix 'remove the whitespace at the end of the line'
   done
@@ -847,15 +860,24 @@ check_breaking_change() {
     lowercase="${line,,}"
     # The token proper, followed by its colon or ending the line — so that body
     # prose such as "Breaking changes are listed below." is left alone.
-    [[ $lowercase =~ ^breaking[[:space:]-]change[[:space:]]*(:|$) ]] || continue
+    # One or more separators, so that "BREAKING  CHANGE:" is caught here and
+    # reported rather than falling past every footer check as prose.
+    [[ $lowercase =~ ^breaking[[:space:]-]+change[[:space:]]*(:|$) ]] || continue
 
     line_no=$((idx + 1))
     token="${line%%:*}"
 
-    if [[ $line != 'BREAKING CHANGE'* && $line != 'BREAKING-CHANGE'* ]]; then
+    if [[ ${line^^} =~ ^BREAKING[[:space:]-]CHANGE && \
+          $line != 'BREAKING CHANGE'* && $line != 'BREAKING-CHANGE'* ]]; then
       error footer "\"${token}\" must be uppercase" \
         --at "$line_no" 1 "${#token}" \
         --why 'BREAKING CHANGE is the one token the spec treats as case-sensitive; BREAKING-CHANGE is a synonym' \
+        --fix 'write "BREAKING CHANGE: <description>"'
+
+    elif [[ ! $line =~ ^BREAKING[[:space:]-]CHANGE ]]; then
+      error footer "\"${token}\" is not the BREAKING CHANGE token" \
+        --at "$line_no" 1 "${#token}" \
+        --why 'the token is exactly "BREAKING CHANGE" or "BREAKING-CHANGE" — one space or one hyphen, and no parser matches anything else' \
         --fix 'write "BREAKING CHANGE: <description>"'
 
     elif [[ ! $line =~ ^BREAKING[[:space:]-]CHANGE:[[:space:]].+ ]]; then
@@ -927,7 +949,10 @@ check_footers_in_body() {
 
   for ((idx = 2; idx < scan_end; idx++)); do
     line="${LINES[idx]}"
-    is_blank "${LINES[idx - 1]}" && continue
+    # A paragraph of its own is no defence: "Refs: #1" with body text below it
+    # is still stranded ahead of the footer block. The paragraphs that stack
+    # legitimately are already past scan_end, because find_footer_start counts
+    # them as part of the block.
     [[ $line =~ ^([A-Za-z][A-Za-z0-9-]*)(:[[:space:]]|[[:space:]]#) ]] || continue
 
     token="${BASH_REMATCH[1]}"
@@ -973,7 +998,7 @@ check_no_ai_attribution() {
       continue
 
     if [[ $lowercase =~ ^co-authored-by:.*$agents ]] ||
-       [[ $lowercase =~ (generated|created|authored|written)[[:space:]-](with|by).*$agents ]] ||
+       [[ $lowercase =~ (generated|created|authored|written|assisted)[[:space:]-](with|by).*$agents ]] ||
        [[ $line == *🤖* ]]; then
       error footer 'AI agent attribution trailer' \
         --at $((idx + 1)) 1 "${#line}" \
