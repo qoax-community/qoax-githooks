@@ -221,11 +221,33 @@ read_message() {
     raw+=("${line%$'\r'}")
   done <"$msg_file"
 
-  # Everything below the scissors line is the verbose diff, whatever marker
-  # git wrote it with.
-  for line in ${raw[@]+"${raw[@]}"}; do
-    [[ $line =~ ^[^[:alnum:][:space:]][[:space:]]*-{2,}[[:space:]]*\>8[[:space:]]*-{2,} ]] && break
-    body+=("$line")
+  # A scissors line is git's own when it introduces the diff --verbose appends,
+  # and git removes that itself in every cleanup mode. One somebody typed is
+  # message content that only the scissors mode removes, so verbatim keeps it
+  # and so must the hook. Tell them apart by whether a diff follows.
+  local idx cut=-1 marker=-1
+  for ((idx = 0; idx < ${#raw[@]}; idx++)); do
+    if [[ ${raw[idx]} =~ ^[^[:alnum:][:space:]][[:space:]]*-{2,}[[:space:]]*\>8[[:space:]]*-{2,} ]]; then
+      marker=$idx
+      break
+    fi
+  done
+  if ((marker >= 0)); then
+    if [[ $CLEANUP_MODE == scissors ]]; then
+      cut=$marker
+    else
+      for ((idx = marker + 1; idx < ${#raw[@]}; idx++)); do
+        if [[ ${raw[idx]} =~ ^(diff\ --git\ |index\ |---\ |\+\+\+\ |@@\ ) ]]; then
+          cut=$marker
+          break
+        fi
+      done
+    fi
+  fi
+
+  for ((idx = 0; idx < ${#raw[@]}; idx++)); do
+    ((cut >= 0 && idx >= cut)) && break
+    body+=("${raw[idx]}")
   done
 
   LINES=()
@@ -267,6 +289,10 @@ read_message() {
 # during an actual merge; "Merge the two config files" typed by hand is an
 # ordinary commit and gets checked like any other.
 is_generated_by_git() {
+  # A title has no exemptions: squash merging turns it into the subject on the
+  # default branch, where "fixup! …" is nobody's idea of a commit message.
+  [[ -n ${COMMIT_MSG_NO_AUTOSQUASH-} ]] && return 1
+
   # The space is git's own: "fixup!nonsense" is somebody's commit, not a marker.
   case "$1" in
     'fixup! '*|'squash! '*|'amend! '*) return 0 ;;
@@ -520,8 +546,10 @@ parse_description() {
 
   elif [[ $remainder =~ ^[[:space:]][[:space:]] ]]; then
     SUBJECT_DESC="$(trim "$remainder")"
+    # Underline what is surplus, not the separator space that belongs there.
+    local spacing="${remainder%%[![:space:]]*}"
     error subject 'extra whitespace after the colon' \
-      --at 1 "$separator_col" 3 \
+      --at 1 $((separator_col + 1)) $((${#spacing} - 1)) \
       --why 'the separator is exactly ": " — one colon, one space, then the description' \
       --fix "write \"${prefix}: ${SUBJECT_DESC}\""
 
@@ -555,7 +583,7 @@ check_type() {
     error subject "unknown type \"${SUBJECT_TYPE}\"" \
       --at 1 1 "${#SUBJECT_TYPE}" \
       --why "the spec allows any noun (§1, §14); this repo keeps to a list so changelog tooling stays predictable: $(list_types)" \
-      --fix "${suggestion:+did you mean \"${suggestion}\"? — }add it to commitMsg.types if this repo should accept it"
+      --fix "${suggestion:+did you mean \"${suggestion}\"? — }add it to DEFAULT_TYPES in .githooks/commit-msg for the whole repo; commitMsg.types only changes your own clone"
 
   elif [[ $SUBJECT_TYPE != "$lowercase" ]]; then
     error subject "type \"${SUBJECT_TYPE}\" is not lowercase" \
@@ -712,7 +740,7 @@ check_footers() {
   check_breaking_change "$footer_start"
   check_footer_tokens "$footer_start"
   check_footers_in_body "$footer_start"
-  check_no_ai_attribution "$footer_start"
+  check_no_ai_attribution
 }
 
 # Where the footer block begins: the last paragraph, extended back over any
@@ -908,11 +936,13 @@ check_footers_in_body() {
 # block, where trailers live: body prose that merely mentions a tool by name is
 # not an attribution.
 check_no_ai_attribution() {
-  local footer_start="$1"
   local agents='(claude|anthropic|copilot|chatgpt|gpt-|cursor|codex|bot@)'
   local idx line lowercase
 
-  for ((idx = footer_start; idx < ${#LINES[@]}; idx++)); do
+  # Every line after the subject, not just the closing block: body text after
+  # a trailer does not make the trailer disappear. The shape test below is what
+  # keeps ordinary prose out of this.
+  for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
     line="${LINES[idx]}"
     lowercase="${line,,}"
 

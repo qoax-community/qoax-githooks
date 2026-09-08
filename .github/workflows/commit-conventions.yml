@@ -106,6 +106,9 @@ jobs:
           # script, so a title can never be read as shell.
           if [ "$EVENT_NAME" = pull_request ]; then
             printf '%s\n' "$PR_TITLE" >"$message"
+            # A commit may carry an autosquash marker; git squashes it away. A
+            # title may not: squash merging makes it the subject on main.
+            export COMMIT_MSG_NO_AUTOSQUASH=1
             check "$message" 'pull request title'
           fi
 
