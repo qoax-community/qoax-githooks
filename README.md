@@ -60,6 +60,7 @@ message rejected. rewrite it to follow the format above
 | Path | What it is |
 | --- | --- |
 | `commit-msg` | The hook. Lives at the repository root so `core.hooksPath` can point straight at a checkout of this repository. |
+| `action.yml` | The composite action CI uses. At the root too, so `github.action_path` is the checkout and the hook is beside it. |
 | `scripts/check-messages.sh` | Runs the hook over a range of commits that already exist — in CI, or before you push. |
 | `tests/` | The hook's regression suite. Runs here and only here; see [Why the tests stay behind](#why-the-tests-stay-behind). |
 | `templates/` | Copy-paste wiring for a repository that wants the hook. |
@@ -72,7 +73,7 @@ giving up the shared one, and what turns "the submodule was never checked out"
 into a clear message instead of a commit that silently went unchecked.
 
 ```sh
-git submodule add https://github.com/qoax-community/qoax-githooks.git .githooks/shared
+git submodule add ../qoax-githooks.git .githooks/shared
 cp .githooks/shared/templates/.githooks/commit-msg .githooks/commit-msg
 chmod +x .githooks/commit-msg
 git update-index --chmod=+x .githooks/commit-msg   # git skips a hook without it
@@ -105,9 +106,28 @@ The workflow is not here. It lives in
 `workflow_call` workflow, so every repository's check is six lines and the
 version of the hook they are all checked against is pinned in one place.
 
-What runs there is `scripts/check-messages.sh` from this repository: the same
-hook, over a pull request's commits and its title — with squash merging the
-title becomes the subject on `main`, so it is held to the same rules.
+What runs there is the composite action at this repository's root, which calls
+`scripts/check-messages.sh`: the same hook, over a pull request's commits and
+its title — with squash merging the title becomes the subject on `main`, so it
+is held to the same rules.
+
+It is an action rather than an `actions/checkout` of this repository for a
+concrete reason. This repository is private, and a caller's `GITHUB_TOKEN`
+cannot read a second private repository — but an organization-accessible
+repository's *actions* are downloaded with a scoped read-only token Actions
+issues itself. Packaging the check as an action is what keeps the whole thing
+free of a PAT. It needs `Settings → Actions → Access` on this repository set to
+"Accessible from repositories in the organization".
+
+A repository can also skip the reusable workflow and call the action directly:
+
+```yaml
+steps:
+  - uses: actions/checkout@v5
+    with:
+      fetch-depth: 0          # or there is no range to enumerate
+  - uses: qoax-community/qoax-githooks@v1
+```
 
 The script is worth having locally too:
 

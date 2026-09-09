@@ -1,0 +1,54 @@
+name: Check commit conventions
+description: >-
+  Runs this repository's commit-msg hook over the commits a pull request or
+  push added, and over a pull request's title.
+author: QOAX Community
+
+# The action lives at the repository root so github.action_path is the checkout
+# itself: the hook and scripts/check-messages.sh sit right beside this file.
+#
+# Fetching it needs no token beyond the one Actions provides, even though this
+# repository is private — an organization-accessible repository's actions are
+# downloaded with a scoped read-only installation token. That is why the check
+# is packaged as an action rather than as an `actions/checkout` of this
+# repository, which the caller's GITHUB_TOKEN cannot read.
+#
+# The caller must have checked itself out with fetch-depth: 0, or there is no
+# range to enumerate.
+
+inputs:
+  range:
+    description: >-
+      A revision range to check, e.g. main..HEAD. Leave unset in CI: the range
+      is derived from the event instead.
+    required: false
+    default: ''
+  check-pull-request-title:
+    description: >-
+      Whether to check the pull request title as well. With squash merging it
+      becomes the commit subject on the default branch, so it is held to the
+      same rules.
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Validate commit messages and pull request title
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        PUSH_BEFORE: ${{ github.event.before }}
+        PUSH_AFTER: ${{ github.sha }}
+        # Passed through the environment rather than interpolated into the
+        # script, so a title can never be read as shell.
+        PR_TITLE: >-
+          ${{ inputs.check-pull-request-title == 'true'
+              && github.event.pull_request.title || '' }}
+        RANGE: ${{ inputs.range }}
+      run: |
+        set -uo pipefail
+        # shellcheck disable=SC2086
+        "${{ github.action_path }}/scripts/check-messages.sh" $RANGE
