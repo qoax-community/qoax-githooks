@@ -265,4 +265,63 @@ t "mixed dashed and spaced token" 1 'feat: x
 
 Signed-off by: Alice'
 
+echo "--- round 15: embedded yaml documents ---"
+# The message Dependabot actually writes, verbatim. Double-quoted only so the
+# single quotes YAML puts around the version survive into the message.
+t "dependabot bump" 0 "ci: bump actions/checkout from 5 to 7
+
+Bumps [actions/checkout](https://github.com/actions/checkout) from 5 to 7.
+- [Release notes](https://github.com/actions/checkout/releases)
+- [Commits](https://github.com/actions/checkout/compare/v5...v7)
+
+---
+updated-dependencies:
+- dependency-name: actions/checkout
+  dependency-version: '7'
+  dependency-type: direct:production
+  update-type: version-update:semver-major
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>"
+# A document as the last paragraph, with no trailer after it.
+t "yaml document ends the message" 0 'chore(deps): bump a dependency
+
+---
+updated-dependencies:
+- dependency-name: x
+...'
+# Only a closed document is one: an opener with no "..." leaves its lines as
+# ordinary text, and the spoiled trailer inside is still reported.
+t "unterminated opener is not a document" 1 'chore(deps): bump a dependency
+
+---
+updated-dependencies:
+
+Signed-off-by: Z'
+# Nor does a document straddle a blank line, which ends the paragraph.
+t "blank line ends the document" 1 'chore(deps): bump a dependency
+
+---
+updated-dependencies:
+
+...
+
+Signed-off-by: Z'
+# The exemption is the document, not the message: a spoiled trailer outside
+# one is reported exactly as before.
+t "bad footer beside a document" 1 'ci: bump actions/checkout from 5 to 7
+
+---
+updated-dependencies:
+- dependency-name: actions/checkout
+...
+
+Reviewed by: Z'
+# "---" alone is a rule somebody typed, not an opener that swallows the rest.
+t "rule of dashes is still content" 1 'feat: x
+
+---
+
+Reviewed by: Z'
+
 echo "failures: $fails"

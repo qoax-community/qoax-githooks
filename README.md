@@ -191,6 +191,30 @@ Two rules about changing the hook:
   because this hook is deliberately stricter than Conventional Commits requires
   a parser to be, and nobody should have to guess who to argue with.
 
+One exemption is worth knowing about, because it is not a rule so much as a
+hole the rules would otherwise leave. A **YAML document in the body** — a line
+that is exactly `---`, its lines, and a line that is exactly `...` — is not
+read for footers:
+
+```
+ci: bump actions/checkout from 5 to 7
+
+---
+updated-dependencies:
+- dependency-name: actions/checkout
+  dependency-version: '7'
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>
+```
+
+That block is what Dependabot writes into every commit it makes.
+`updated-dependencies:` is a mapping key whose value is on the lines below it,
+not a trailer with nothing after the colon — and without the exemption every
+bot commit in every repository using this hook fails the check, which is how
+it was found. The document must be opened *and* closed, and must not straddle
+a blank line, so a lone `---` stays what somebody typed: a rule of dashes.
+
 The hook needs bash 4+. On macOS that means `brew install bash`; without it the
 hook warns instead of blocking.
 

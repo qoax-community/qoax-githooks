@@ -117,6 +117,9 @@ COMMENT_CHAR='#'      # the comment character; empty only under commentChar=auto
 LINES=()
 # Set when a comment line was dropped from where the subject would otherwise be.
 SUBJECT_MAY_BE_COMMENT=0
+# Indices of lines inside an embedded YAML document, filled in by
+# mark_yaml_documents. Sparse: only the lines that are in one.
+YAML_DOCUMENT_LINES=()
 
 # --- Helpers ----------------------------------------------------------------
 
@@ -808,6 +811,8 @@ check_trailing_whitespace() {
 check_footers() {
   ((${#LINES[@]} > 1)) || return 0
 
+  mark_yaml_documents
+
   local footer_start
   footer_start="$(find_footer_start)"
 
@@ -926,10 +931,54 @@ is_footer_token() {
   [[ $1 == BREAKING* || $1 == *-* ]] || is_known_footer_token "$1"
 }
 
+# Dependabot ends every commit body with a machine-readable summary, written
+# as a YAML document between the two markers YAML spells them with:
+#
+#   ---
+#   updated-dependencies:
+#   - dependency-name: actions/checkout
+#     dependency-version: '7'
+#   ...
+#
+# "updated-dependencies:" is a mapping key whose value is on the lines below
+# it, not a trailer token with nothing after the colon — and reading it as one
+# fails every bot commit in every repository that uses this hook. So the lines
+# of a document are not footer candidates.
+#
+# Only a document that is opened and closed counts, and only one that holds
+# together: a lone "---" is a horizontal rule somebody typed, and a blank line
+# ends the paragraph, which is as far as anything git parses reaches.
+mark_yaml_documents() {
+  local idx end scan
+
+  YAML_DOCUMENT_LINES=()
+  for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
+    [[ ${LINES[idx]} == '---' ]] || continue
+
+    end=-1
+    for ((scan = idx + 1; scan < ${#LINES[@]}; scan++)); do
+      is_blank "${LINES[scan]}" && break
+      [[ ${LINES[scan]} == '...' ]] && { end=$scan; break; }
+    done
+    ((end < 0)) && continue
+
+    for ((scan = idx; scan <= end; scan++)); do
+      YAML_DOCUMENT_LINES[scan]=1
+    done
+    idx=$end
+  done
+}
+
+# True when line <idx> is part of an embedded YAML document.
+in_yaml_document() {
+  [[ -n ${YAML_DOCUMENT_LINES[$1]-} ]]
+}
+
 check_footer_separators() {
   local idx line token
 
   for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
+    in_yaml_document "$idx" && continue
     line="${LINES[idx]}"
 
     # A token and a colon and nothing else. The breaking-change token has its
@@ -972,6 +1021,7 @@ check_breaking_change() {
   local footer_start="$1" idx line lowercase token line_no
 
   for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
+    in_yaml_document "$idx" && continue
     line="${LINES[idx]}"
     lowercase="${line,,}"
     # The token proper, followed by its colon or ending the line — so that body
@@ -1030,6 +1080,7 @@ check_footer_tokens() {
   # is the same spoiled trailer, and the footer block moving past it does not
   # make it well formed.
   for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
+    in_yaml_document "$idx" && continue
     line="${LINES[idx]}"
     # Breaking-change lines are check_breaking_change's business, whatever
     # case they are written in; reporting them twice helps nobody.
@@ -1067,6 +1118,7 @@ check_footers_in_body() {
   fi
 
   for ((idx = 2; idx < scan_end; idx++)); do
+    in_yaml_document "$idx" && continue
     line="${LINES[idx]}"
     # One finding per line: a bad separator has already been reported, and it
     # is why this line does not read as a footer in the first place.
