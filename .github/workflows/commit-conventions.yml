@@ -1,4 +1,4 @@
-name: Check commit conventions
+name: CI
 
 on:
   pull_request:
@@ -15,29 +15,38 @@ permissions:
 # a group of its own instead.
 concurrency:
   group: >-
-    commit-conventions-${{ github.event.pull_request.number
+    ci-${{ github.event.pull_request.number
       || format('{0}@{1}', github.ref, github.sha) }}
   cancel-in-progress: true
 
 jobs:
-  conventional-commits:
-    name: Conventional Commits
+  # The hook's regression suite. It lives here and runs only here: repositories
+  # that consume the hook get the hook, not its tests.
+  tests:
+    name: commit-msg suite
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Run the suite
+        run: tests/run.sh
+
+  # The hook checks this repository's own messages, with the copy under review
+  # rather than a released one — a change that stops enforcing a rule shows up
+  # as a failure here first.
+  commit-conventions:
+    name: Conventional Commits
+    runs-on: ubuntu-latest
+    # Ordered after the suite so a broken hook is reported as a broken hook,
+    # not as a branch that happens to pass.
+    needs: tests
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
 
-      # The hook's own regression suite. It runs before the messages are
-      # checked, so a hook that has stopped enforcing a rule is reported as a
-      # broken hook rather than as a branch that happens to pass.
-      - name: Test the commit-msg hook
-        run: tests/run.sh
-
-      # Runs the same commit-msg contributors get locally, so the
-      # rules cannot drift apart. A pull request title is checked too: with
-      # squash merging it becomes the commit subject on main.
       - name: Validate commit messages and pull request title
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -46,94 +55,4 @@ jobs:
           PUSH_BEFORE: ${{ github.event.before }}
           PUSH_AFTER: ${{ github.sha }}
           PR_TITLE: ${{ github.event.pull_request.title }}
-          COMMIT_MSG_REPORT_ONLY: '1'
-        run: |
-          set -uo pipefail
-
-          hook=commit-msg
-
-          # A hook without the executable bit is silently skipped by git, so
-          # contributors would get no validation at all. Catch that here.
-          if [ ! -x "$hook" ]; then
-            printf '::error::%s is not executable, git will not run it. ' "$hook"
-            printf 'Fix with: git update-index --chmod=+x %s\n' "$hook"
-            exit 1
-          fi
-          message="$(mktemp)"
-          output="$(mktemp)"
-          failures=0
-
-          # Validate the message in $1, labelled $2 for the log and summary.
-          check() {
-            local label="$2"
-            if "$hook" "$1" >"$output" 2>&1; then
-              printf '::notice::%s — ok\n' "$label"
-              # A pass can still have something to say; do not swallow it.
-              [ -s "$output" ] && cat "$output"
-              return 0
-            fi
-            failures=$((failures + 1))
-            printf '::group::%s — rejected\n' "$label"
-            cat "$output"
-            printf '::endgroup::\n'
-            {
-              # An indented block rather than a fenced one: the hook echoes the
-              # message back, and a message may contain a fence of its own.
-              printf '### %s\n\n' "$label"
-              sed 's/^/    /' "$output"
-              printf '\n'
-            } >>"$GITHUB_STEP_SUMMARY"
-          }
-
-          if [ "$EVENT_NAME" = pull_request ]; then
-            range="$(git merge-base "$BASE_SHA" "$HEAD_SHA")..${HEAD_SHA}"
-          elif [ -n "${PUSH_BEFORE#0000000000000000000000000000000000000000}" ]; then
-            range="${PUSH_BEFORE}..${PUSH_AFTER}"
-          else
-            # The branch was created by this push, so there is no range to
-            # compare against. Everything it carries would mean the whole
-            # history, which predates this convention, so check the tip and say
-            # plainly that the rest went unchecked rather than implying it did.
-            # "<rev>^!" is that commit and nothing it descends from, which
-            # works for a root commit and does not drag in a merge's second
-            # parent the way "<rev>~1.." would.
-            range="${PUSH_AFTER}^!"
-            printf '::notice::branch created by this push — only its tip commit is checked\n'
-          fi
-
-          # A range that cannot be enumerated is a broken assumption, not an
-          # empty result: after a force-push the old tip is simply gone. Say so
-          # instead of quietly falling back to checking one commit.
-          if ! commits="$(git rev-list --no-merges --reverse "$range")"; then
-            printf '::error::cannot enumerate %s — the range is not available in this ' "$range"
-            printf 'checkout, which happens after a force-push. Re-run this job.\n'
-            exit 1
-          fi
-
-          if [ -z "$commits" ]; then
-            printf 'no commits in %s\n' "$range"
-          fi
-
-          for sha in $commits; do
-            git log -1 --format=%B "$sha" >"$message"
-            check "$message" "commit $(git log -1 --format=%h "$sha")"
-          done
-
-          # Passed through the environment rather than interpolated into this
-          # script, so a title can never be read as shell.
-          if [ "$EVENT_NAME" = pull_request ]; then
-            printf '%s\n' "$PR_TITLE" >"$message"
-            # A commit may carry an autosquash marker; git squashes it away. A
-            # title may not: squash merging makes it the subject on main.
-            export COMMIT_MSG_NO_AUTOSQUASH=1
-            check "$message" 'pull request title'
-          fi
-
-          if [ "$failures" -gt 0 ]; then
-            printf "\n%s message(s) do not follow this repository's commit\n" "$failures" >&2
-            printf 'conventions: Conventional Commits v1.0.0 plus the house rules above.\n' >&2
-            printf 'Rewrite them with `git rebase -i` (or edit the pull request title) and push again.\n' >&2
-            exit 1
-          fi
-
-          printf "All checked messages follow this repository's commit conventions.\n"
+        run: scripts/check-messages.sh
