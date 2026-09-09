@@ -7,11 +7,12 @@ author: QOAX Community
 # The action lives at the repository root so github.action_path is the checkout
 # itself: the hook and scripts/check-messages.sh sit right beside this file.
 #
-# Fetching it needs no token beyond the one Actions provides, even though this
-# repository is private — an organization-accessible repository's actions are
-# downloaded with a scoped read-only installation token. That is why the check
-# is packaged as an action rather than as an `actions/checkout` of this
-# repository, which the caller's GITHUB_TOKEN cannot read.
+# The check is packaged as an action rather than as an `actions/checkout` of
+# this repository so that a caller needs one step and no knowledge of the
+# layout, and so that it keeps working whatever this repository's visibility
+# is: an organization-accessible repository's actions are downloaded with a
+# scoped read-only installation token Actions issues itself, where a caller's
+# GITHUB_TOKEN cannot read a second private repository at all.
 #
 # The caller must have checked itself out with fetch-depth: 0, or there is no
 # range to enumerate.

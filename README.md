@@ -101,9 +101,9 @@ template starts out wired up.
 
 ## Checking messages in CI
 
-The workflow is not here. It lives in
-[`qoax-reusables`](https://github.com/qoax-community/qoax-reusables) as a
-`workflow_call` workflow, so every repository's check is six lines and the
+The workflow is not here. For the organization's private repositories it lives
+in [`qoax-reusables`](https://github.com/qoax-community/qoax-reusables) as a
+`workflow_call` workflow, so each repository's check is six lines and the
 version of the hook they are all checked against is pinned in one place.
 
 What runs there is the composite action at this repository's root, which calls
@@ -111,15 +111,22 @@ What runs there is the composite action at this repository's root, which calls
 its title — with squash merging the title becomes the subject on `main`, so it
 is held to the same rules.
 
-It is an action rather than an `actions/checkout` of this repository for a
-concrete reason. This repository is private, and a caller's `GITHUB_TOKEN`
-cannot read a second private repository — but an organization-accessible
+It is an action rather than an `actions/checkout` of this repository so that a
+caller needs one step and no knowledge of the layout, and so that it survives
+a visibility change in either repository. An organization-accessible
 repository's *actions* are downloaded with a scoped read-only token Actions
-issues itself. Packaging the check as an action is what keeps the whole thing
-free of a PAT. It needs `Settings → Actions → Access` on this repository set to
-"Accessible from repositories in the organization".
+issues itself, where a caller's `GITHUB_TOKEN` cannot read a second private
+repository at all — so the whole arrangement never needs a PAT. That path
+needs `Settings → Actions → Access` on this repository set to "Accessible from
+repositories in the organization", which is set.
 
-A repository can also skip the reusable workflow and call the action directly:
+**A public repository has to call the action directly**, because a public
+repository may not call a `workflow_call` workflow that lives in a private one
+— and `qoax-reusables` is private. `qoax-community-website` is the
+organization's public repository and does exactly this; it is also why this
+repository is public, so that both the action and the submodule are reachable
+from it. Any repository can use this form if it would rather name its own pin
+than take the one `qoax-reusables` decides:
 
 ```yaml
 steps:
