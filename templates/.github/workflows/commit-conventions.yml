@@ -1,0 +1,29 @@
+# Copy this into a repository as .github/workflows/commit-conventions.yml.
+#
+# The check itself lives in qoax-community/qoax-reusables, which pins the
+# version of the hook every repository is checked against, so a new rule
+# reaches all of them in one pull request there.
+name: Check commit conventions
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A pull request may cancel its own earlier run: the next one re-checks the
+# whole range. A push may not — it is checked over the range it pushed, so
+# cancelling it would leave those commits unchecked by anything. Give each push
+# a group of its own instead.
+concurrency:
+  group: >-
+    commit-conventions-${{ github.event.pull_request.number
+      || format('{0}@{1}', github.ref, github.sha) }}
+  cancel-in-progress: true
+
+jobs:
+  commit-conventions:
+    uses: qoax-community/qoax-reusables/.github/workflows/commit-conventions.yml@main

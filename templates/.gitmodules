@@ -1,0 +1,10 @@
+# Merge this into the repository's .gitmodules, or let `git submodule add`
+# write it:
+#
+#   git submodule add https://github.com/qoax-community/qoax-githooks.git .githooks/shared
+#
+# The url is https rather than ssh so a clone works for anyone who can read the
+# repository, including CI, without a key.
+[submodule ".githooks/shared"]
+	path = .githooks/shared
+	url = https://github.com/qoax-community/qoax-githooks.git
