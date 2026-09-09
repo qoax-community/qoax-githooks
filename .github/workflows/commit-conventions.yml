@@ -47,12 +47,8 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Through the action, which is how every other repository reaches this
+      # check. A malformed action.yml would otherwise only be discovered by
+      # whoever bumped the pin in qoax-reusables.
       - name: Validate commit messages and pull request title
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PUSH_BEFORE: ${{ github.event.before }}
-          PUSH_AFTER: ${{ github.sha }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: scripts/check-messages.sh
+        uses: ./
