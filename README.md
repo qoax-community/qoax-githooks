@@ -169,6 +169,16 @@ mechanism.
 
 ## Working on the hook
 
+The hook is at the repository root and there is no `.githooks` shim here, so
+point git straight at the checkout — this is the one repository where that
+single line is the whole setup:
+
+```sh
+git config core.hooksPath .
+```
+
+Then the suite:
+
 ```sh
 tests/run.sh                    # the whole suite against the tracked hook
 tests/run.sh path/to/other-copy # against another copy
