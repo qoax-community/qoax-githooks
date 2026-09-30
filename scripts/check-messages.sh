@@ -101,9 +101,19 @@ fi
 # A range that cannot be enumerated is a broken assumption, not an empty
 # result: after a force-push the old tip is simply gone. Say so instead of
 # quietly falling back to checking one commit.
+#
+# Re-running the job is not a fix for either cause: a re-run replays the same
+# event, with the same before sha, into a checkout made the same way.
 if ! commits="$(git rev-list --no-merges --reverse "$range")"; then
-  err 'cannot enumerate %s — the range is not available in this checkout, ' "$range"
-  printf 'which happens after a force-push. Re-run this job.\n' >&2
+  err 'cannot enumerate %s — the range is not available in this checkout.\n' "$range"
+  if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+    printf 'The checkout is shallow: check out with fetch-depth: 0.\n' >&2
+  elif [ "$#" -eq 0 ]; then
+    printf 'The push replaced commits this checkout never fetched, which is what a\n' >&2
+    printf 'force-push does, so its range cannot be recovered and re-running this job\n' >&2
+    printf 'fails the same way. Check the rewritten commits yourself with\n' >&2
+    printf '`scripts/check-messages.sh <base>..<branch>`; the next push is checked as usual.\n' >&2
+  fi
   exit 1
 fi
 
