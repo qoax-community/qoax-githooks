@@ -201,7 +201,7 @@ Two rules about changing the hook:
   because this hook is deliberately stricter than Conventional Commits requires
   a parser to be, and nobody should have to guess who to argue with.
 
-One exemption is worth knowing about, because it is not a rule so much as a
+Two exemptions are worth knowing about. The first is not a rule so much as a
 hole the rules would otherwise leave. A **YAML document in the body** — a line
 that is exactly `---`, its lines, and a line that is exactly `...` — is not
 read for footers:
@@ -224,6 +224,24 @@ not a trailer with nothing after the colon — and without the exemption every
 bot commit in every repository using this hook fails the check, which is how
 it was found. The document must be opened *and* closed, and must not straddle
 a blank line, so a lone `---` stays what somebody typed: a rule of dashes.
+
+The other is **Dependabot's own messages**, which are held to every rule except
+three. `commit-message.prefix` (and `include: scope`) in `dependabot.yml` give
+it a type and a scope; nothing there gives it a width or a case. It never wraps
+the `Bumps [x](url) from a to b.` line or the links under it, a grouped update's
+subject is past 72 characters on its own (`chore(deps-dev): bump the dev-tooling
+group across 1 directory with 9 updates`), and whether it writes `bump` or
+`Bump` depends on the repository's recent history, whatever the prefix. So for
+a message Dependabot wrote, subject length, a capital first letter and body
+width are waived. A missing or unknown type is still an error, because the
+config can fix that, which is why `templates/.github/dependabot.yml` sets a
+prefix.
+
+A message counts as Dependabot's when its footer block has the sign-off
+Dependabot ends every commit with,
+`Signed-off-by: dependabot[bot] <support@github.com>`. A pull request title has
+no footer, so the action passes the pull request's author along and a title
+Dependabot wrote gets the same three waivers.
 
 The hook needs bash 4+. On macOS that means `brew install bash`; without it the
 hook warns instead of blocking.
