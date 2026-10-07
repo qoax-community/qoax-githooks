@@ -48,6 +48,8 @@ runs:
         PR_TITLE: >-
           ${{ inputs.check-pull-request-title == 'true'
               && github.event.pull_request.title || '' }}
+        # Dependabot's title gets the waivers its commits do.
+        PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         RANGE: ${{ inputs.range }}
       run: |
         set -uo pipefail

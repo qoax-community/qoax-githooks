@@ -324,4 +324,74 @@ t "rule of dashes is still content" 1 'feat: x
 
 Reviewed by: Z'
 
+echo "--- round 16: dependabot's own messages ---"
+# Every case is cut down from a real Dependabot pull request, in the shape
+# that failed the check. Its unwrapped body lines first.
+t "dependabot submodule bump" 0 'chore: bump .githooks/shared from `8464a30` to `e70b5fc`
+
+Bumps [.githooks/shared](https://github.com/qoax-community/qoax-githooks) from `8464a30` to `e70b5fc`.
+- [Commits](https://github.com/qoax-community/qoax-githooks/compare/8464a30422a5302e8a1a8ee0bf60fa62378d9b63...e70b5fc7643f403eb6991a655cb417e48f9ffad8)
+
+---
+updated-dependencies:
+- dependency-name: ".githooks/shared"
+  dependency-version: e70b5fc7643f403eb6991a655cb417e48f9ffad8
+  dependency-type: direct:production
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>'
+# A grouped update: the subject alone is past the limit, and the table is wide.
+t "dependabot group update" 0 'chore(deps-dev): bump the dev-tooling group across 1 directory with 9 updates
+
+Bumps the dev-tooling group with 9 updates in the / directory:
+
+| Package | From | To |
+| --- | --- | --- |
+| [@changesets/cli](https://github.com/changesets/changesets/tree/HEAD/packages/cli) | `2.31.1` | `3.0.3` |
+| [@types/node](https://github.com/DefinitelyTyped/DefinitelyTyped/tree/HEAD/types/node) | `26.5.0` | `26.6.2` |
+
+---
+updated-dependencies:
+- dependency-name: "@changesets/cli"
+  dependency-version: 3.0.3
+  dependency-type: direct:development
+  update-type: version-update:semver-major
+  dependency-group: dev-tooling
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>'
+# With the same prefix configured, a young repository got "Bump".
+t "dependabot capital from history" 0 'chore: Bump .githooks/shared from `13c0c65` to `e70b5fc`
+
+---
+updated-dependencies:
+- dependency-name: ".githooks/shared"
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>'
+# The waiver is for Dependabot. The same body from anybody else is reported.
+t "same body without the sign-off" 1 'chore: bump .githooks/shared from `8464a30` to `e70b5fc`
+
+Bumps [.githooks/shared](https://github.com/qoax-community/qoax-githooks) from `8464a30` to `e70b5fc`.'
+t "sign-off in the body, not the footer" 1 'chore: bump x from 1 to 2
+
+Signed-off-by: dependabot[bot] <support@github.com>
+
+Bumps [x](https://example.com/a/rather/long/path/to/the/project) from 1 to 2, and then some more words.'
+# Only those three rules. Without a prefix in dependabot.yml there is no type,
+# and that is still an error: it is the config that fixes it.
+t "dependabot without a prefix" 1 'Bump x from 1 to 2
+
+Signed-off-by: dependabot[bot] <support@github.com>'
+t "dependabot type not in the list" 1 'deps: bump x from 1 to 2
+
+Signed-off-by: dependabot[bot] <support@github.com>'
+# A pull request title has no trailer; CI says whose it is through the
+# environment instead.
+export COMMIT_MSG_FROM_DEPENDABOT=1
+t "dependabot title from the event" 0 'chore(deps-dev): bump the dev-tooling group across 1 directory with 9 updates'
+t "dependabot title, no type" 1 'Bump the dev-tooling group across 1 directory with 9 updates'
+unset COMMIT_MSG_FROM_DEPENDABOT
+t "same title from anybody else" 1 'chore(deps-dev): bump the dev-tooling group across 1 directory with 9 updates'
+
 echo "failures: $fails"

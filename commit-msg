@@ -14,6 +14,10 @@
 # length, imperative mood, no capital or full stop, body width. Each finding
 # says which it is, so nobody has to guess who to argue with.
 #
+# Dependabot's messages are held to all of it except subject length, a capital
+# first letter and body width, which nothing in dependabot.yml can change; see
+# mark_dependabot.
+#
 # Enable:   git config core.hooksPath .githooks
 # Bypass:   git commit --no-verify
 #
@@ -120,6 +124,8 @@ SUBJECT_MAY_BE_COMMENT=0
 # Indices of lines inside an embedded YAML document, filled in by
 # mark_yaml_documents. Sparse: only the lines that are in one.
 YAML_DOCUMENT_LINES=()
+# Set when Dependabot wrote the message, by mark_dependabot.
+FROM_DEPENDABOT=0
 
 # --- Helpers ----------------------------------------------------------------
 
@@ -473,6 +479,7 @@ check_subject_indent() {
 
 check_subject_length() {
   local subject="$1"
+  ((FROM_DEPENDABOT)) && return 0
   ((${#subject} > SUBJECT_MAX)) || return 0
 
   error subject "subject is ${#subject} characters (max ${SUBJECT_MAX})" \
@@ -692,7 +699,7 @@ check_description() {
 
   local desc="$SUBJECT_DESC" col="$SUBJECT_DESC_COL"
 
-  if [[ $desc =~ ^[[:upper:]] ]]; then
+  if [[ $desc =~ ^[[:upper:]] ]] && ((!FROM_DEPENDABOT)); then
     error subject 'description starts with a capital letter' \
       --at 1 "$col" 1 \
       --why 'the spec is case-insensitive here (§15); this repo keeps descriptions lowercase for uniform changelogs' \
@@ -753,6 +760,8 @@ check_body() {
 
 check_body_line_length() {
   local idx line in_code_fence=0
+
+  ((FROM_DEPENDABOT)) && return 0
 
   for ((idx = 1; idx < ${#LINES[@]}; idx++)); do
     line="${LINES[idx]}"
@@ -972,6 +981,44 @@ mark_yaml_documents() {
 # True when line <idx> is part of an embedded YAML document.
 in_yaml_document() {
   [[ -n ${YAML_DOCUMENT_LINES[$1]-} ]]
+}
+
+# Dependabot writes its own messages, and dependabot.yml reaches only part of
+# them. commit-message.prefix and include: scope give it a type and a scope
+# this repo accepts; nothing gives it a width or a case. It never wraps the
+# "Bumps [x](url) from a to b." line or the links under it, a grouped update's
+# subject is past the limit on its own ("bump the dev-tooling group across 1
+# directory with 9 updates"), and whether "bump" gets a capital is decided by
+# the repository's recent history, not by the config.
+#
+# So for a message Dependabot wrote, the three house rules it cannot be made to
+# follow are waived: subject length, a capital first letter, body width. Every
+# other rule still applies, and that is what holds dependabot.yml to a prefix.
+#
+# Dependabot ends every message with this sign-off, so its presence in the
+# footer block is what marks one. A pull request title carries no trailer, so
+# CI sets COMMIT_MSG_FROM_DEPENDABOT for the title of a pull request Dependabot
+# opened instead.
+readonly DEPENDABOT_SIGNOFF='Signed-off-by: dependabot[bot] <support@github.com>'
+
+mark_dependabot() {
+  local idx footer_start
+
+  FROM_DEPENDABOT=0
+  if [[ -n ${COMMIT_MSG_FROM_DEPENDABOT-} ]]; then
+    FROM_DEPENDABOT=1
+    return 0
+  fi
+  ((${#LINES[@]} > 1)) || return 0
+
+  footer_start="$(find_footer_start)"
+  for ((idx = footer_start; idx < ${#LINES[@]}; idx++)); do
+    if [[ ${LINES[idx]} == "$DEPENDABOT_SIGNOFF" ]]; then
+      FROM_DEPENDABOT=1
+      return 0
+    fi
+  done
+  return 0
 }
 
 check_footer_separators() {
@@ -1485,6 +1532,7 @@ main() {
 
   ((${#LINES[@]})) || die 'the commit message is empty — aborting.'
   is_generated_by_git "${LINES[0]}" && exit 0
+  mark_dependabot
 
   check_subject
   check_body

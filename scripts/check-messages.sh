@@ -14,6 +14,8 @@
 # environment: EVENT_NAME, BASE_SHA and HEAD_SHA for a pull request,
 # PUSH_BEFORE and PUSH_AFTER for a push. PR_TITLE, when set, is checked too:
 # with squash merging it becomes the commit subject on the default branch.
+# PR_AUTHOR says who opened the pull request, so that Dependabot's title gets
+# the waivers its commits do.
 #
 # Findings are annotated for Actions only when GITHUB_ACTIONS is set, so the
 # local output stays plain. Exit status is the number of failures, capped at 1.
@@ -132,7 +134,13 @@ if [ -n "${PR_TITLE-}" ]; then
   printf '%s\n' "$PR_TITLE" >"$message"
   # A commit may carry an autosquash marker; git squashes it away. A title may
   # not: squash merging makes it the subject on the default branch.
-  COMMIT_MSG_NO_AUTOSQUASH=1 check "$message" 'pull request title'
+  #
+  # Dependabot's title is its commit's subject, but without the sign-off the
+  # hook recognises its commits by, so the event has to say whose it is.
+  from_dependabot=''
+  [ "${PR_AUTHOR-}" = 'dependabot[bot]' ] && from_dependabot=1
+  COMMIT_MSG_NO_AUTOSQUASH=1 COMMIT_MSG_FROM_DEPENDABOT="$from_dependabot" \
+    check "$message" 'pull request title'
 fi
 
 if [ "$failures" -gt 0 ]; then
