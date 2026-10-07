@@ -378,7 +378,27 @@ t "sign-off in the body, not the footer" 1 'chore: bump x from 1 to 2
 Signed-off-by: dependabot[bot] <support@github.com>
 
 Bumps [x](https://example.com/a/rather/long/path/to/the/project) from 1 to 2, and then some more words.'
-# Only those three rules. Without a prefix in dependabot.yml there is no type,
+# What lands on main when somebody squash-merges it: GitHub adds Dependabot
+# as co-author, and that names the bot whose message it is, not an agent.
+t "dependabot squash-merged" 0 'chore: bump .githooks/shared from `8464a30` to `e70b5fc` (#4)
+
+Bumps [.githooks/shared](https://github.com/qoax-community/qoax-githooks) from `8464a30` to `e70b5fc`.
+
+---
+updated-dependencies:
+- dependency-name: ".githooks/shared"
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>
+Co-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>'
+t "dependabot co-author on anybody else" 1 'chore: bump x from 1 to 2
+
+Co-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>'
+t "other bot beside dependabot's sign-off" 1 'chore: bump x from 1 to 2
+
+Signed-off-by: dependabot[bot] <support@github.com>
+Co-authored-by: Copilot <175728472+copilot@users.noreply.github.com>'
+# Only those rules. Without a prefix in dependabot.yml there is no type,
 # and that is still an error: it is the config that fixes it.
 t "dependabot without a prefix" 1 'Bump x from 1 to 2
 

@@ -233,9 +233,11 @@ subject is past 72 characters on its own (`chore(deps-dev): bump the dev-tooling
 group across 1 directory with 9 updates`), and whether it writes `bump` or
 `Bump` depends on the repository's recent history, whatever the prefix. So for
 a message Dependabot wrote, subject length, a capital first letter and body
-width are waived. A missing or unknown type is still an error, because the
-config can fix that, which is why `templates/.github/dependabot.yml` sets a
-prefix.
+width are waived. So is the `Co-authored-by: dependabot[bot] <…>` trailer
+GitHub appends when somebody else squash-merges its pull request: it names the
+bot whose message this is, not an agent that helped write it. A missing or
+unknown type is still an error, because the config can fix that, which is why
+`templates/.github/dependabot.yml` sets a prefix.
 
 A message counts as Dependabot's when its footer block has the sign-off
 Dependabot ends every commit with,
