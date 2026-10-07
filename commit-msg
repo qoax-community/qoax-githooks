@@ -15,7 +15,8 @@
 # says which it is, so nobody has to guess who to argue with.
 #
 # Dependabot's messages are held to all of it except subject length, a capital
-# first letter and body width, which nothing in dependabot.yml can change; see
+# first letter and body width, which nothing in dependabot.yml can change, and
+# the co-author trailer GitHub adds for it on a squash merge; see
 # mark_dependabot.
 #
 # Enable:   git config core.hooksPath .githooks
@@ -992,14 +993,18 @@ in_yaml_document() {
 # the repository's recent history, not by the config.
 #
 # So for a message Dependabot wrote, the three house rules it cannot be made to
-# follow are waived: subject length, a capital first letter, body width. Every
-# other rule still applies, and that is what holds dependabot.yml to a prefix.
+# follow are waived: subject length, a capital first letter, body width. So is
+# the co-author trailer naming Dependabot that GitHub appends when somebody
+# else squash-merges its pull request; it is the bot whose message this is, not
+# an agent. Every other rule still applies, and that is what holds
+# dependabot.yml to a prefix.
 #
 # Dependabot ends every message with this sign-off, so its presence in the
 # footer block is what marks one. A pull request title carries no trailer, so
 # CI sets COMMIT_MSG_FROM_DEPENDABOT for the title of a pull request Dependabot
 # opened instead.
 readonly DEPENDABOT_SIGNOFF='Signed-off-by: dependabot[bot] <support@github.com>'
+readonly DEPENDABOT_COAUTHOR='Co-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>'
 
 mark_dependabot() {
   local idx footer_start
@@ -1250,6 +1255,10 @@ check_no_ai_attribution() {
       [[ $line == 🤖* ]] ||
       [[ $line =~ ^[A-Za-z][A-Za-z0-9-]*([[:space:]]+[A-Za-z0-9-]+)*: ]] ||
       continue
+
+    # GitHub adds this when somebody squash-merges Dependabot's pull request.
+    # It names the bot whose message this is, not an agent that helped write it.
+    ((FROM_DEPENDABOT)) && [[ $line == "$DEPENDABOT_COAUTHOR" ]] && continue
 
     # A co-author is judged on its own terms — the phrase test below would
     # match every "co-authored-by" line whose person shares a name with a tool.
