@@ -49,6 +49,11 @@ fi
 # "commit aborted" wording it uses at commit time.
 export COMMIT_MSG_REPORT_ONLY=1
 
+# Only this script decides what is Dependabot's: a commit by its sign-off, a
+# title by the event. Inherited from a workflow's env, the variable would waive
+# Dependabot's rules for every commit in the range.
+unset COMMIT_MSG_FROM_DEPENDABOT
+
 message="$(mktemp)"
 output="$(mktemp)"
 trap 'rm -f "$message" "$output"' EXIT
