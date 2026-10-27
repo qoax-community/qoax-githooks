@@ -2,7 +2,7 @@ name: Check commit conventions
 description: >-
   Runs this repository's commit-msg hook over the commits a pull request or
   push added, and over a pull request's title.
-author: QOAX Community
+author: Qoax Community
 
 # The action lives at the repository root so github.action_path is the checkout
 # itself: the hook and scripts/check-messages.sh sit right beside this file.
