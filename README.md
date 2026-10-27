@@ -1,6 +1,6 @@
 # qoax-githooks
 
-The git hooks shared across the QOAX Community organization, and the checks
+The git hooks shared across the Qoax Community organization, and the checks
 that keep them honest.
 
 Today that is one hook: `commit-msg`, a [Conventional Commits
