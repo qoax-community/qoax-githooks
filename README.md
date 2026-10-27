@@ -174,8 +174,14 @@ point git straight at the checkout — this is the one repository where that
 single line is the whole setup:
 
 ```sh
-git config core.hooksPath .
+git config core.hooksPath "$(git rev-parse --show-toplevel)"
 ```
+
+The path has to be absolute. Set to `.`, git looks the hook up as a bare
+`commit-msg` on `PATH` instead of in the checkout, and every commit fails with
+`cannot run commit-msg: No such file or directory` (git 2.56). The
+`.githooks` that consuming repositories use is fine, because the hook's path
+still has a directory in it. Run the line again if the checkout moves.
 
 Then the suite:
 
