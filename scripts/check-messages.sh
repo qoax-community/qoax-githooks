@@ -25,7 +25,28 @@ set -uo pipefail
 # Workflow commands only mean something to Actions; locally they are noise.
 annotate() { [ -n "${GITHUB_ACTIONS-}" ] && printf "$@"; return 0; }
 plain()    { [ -z "${GITHUB_ACTIONS-}" ] && printf "$@"; return 0; }
-err()      { annotate '::error::'; printf "$@" >&2; }
+
+# A workflow command ends at a newline and reads % as an escape.
+escape_data() {
+  local s="$1"
+  s="${s//%/%25}"
+  s="${s//$'\r'/%0D}"
+  s="${s//$'\n'/%0A}"
+  printf '%s' "$s"
+}
+
+# The runner reads stdout and stderr as two streams, line by line, and finds
+# workflow commands in both. So the command and its message must be one line
+# of one stream, or the annotation has no text.
+err() {
+  local message
+  message="$(printf "$@")"
+  if [ -n "${GITHUB_ACTIONS-}" ]; then
+    printf '::error::%s\n' "$(escape_data "$message")" >&2
+  else
+    printf '%s\n' "$message" >&2
+  fi
+}
 
 summary() {
   [ -n "${GITHUB_STEP_SUMMARY-}" ] || return 0

@@ -59,113 +59,355 @@ message rejected. rewrite it to follow the format above
 
 | Path | What it is |
 | --- | --- |
-| `commit-msg` | The hook. Lives at the repository root so `core.hooksPath` can point straight at a checkout of this repository. |
-| `action.yml` | The composite action CI uses. At the root too, so `github.action_path` is the checkout and the hook is beside it. |
-| `scripts/check-messages.sh` | Runs the hook over a range of commits that already exist — in CI, or before you push. |
-| `tests/` | The hook's regression suite. Runs here and only here; see [Why the tests stay behind](#why-the-tests-stay-behind). |
-| `templates/` | Copy-paste wiring for a repository that wants the hook. |
+| `commit-msg` | The hook. It is at the repository root, so `core.hooksPath` can point straight at a checkout of this repository. Each repository that uses it tracks a copy at `.githooks/commit-msg`. |
+| `action.yml` | The composite action for CI. It compares the copy of a repository with `commit-msg`, then runs the hook over the new commits and the pull request title. It is at the root too, so `github.action_path` is the checkout and the hook is next to it. |
+| `scripts/check-copy.sh` | The compare that the action runs. |
+| `scripts/check-messages.sh` | Runs the hook over a range of commits that already exist, in CI or before you push. |
+| `scripts/hook-releases.txt` | The blob of `commit-msg` in each release. With it, the compare names the release of an older copy. |
+| `scripts/sync-hook.sh` | Writes the hook of the pinned release into `.githooks/commit-msg` of a repository. With `--check`, it only compares. |
+| `scripts/migrate-from-submodule.sh` | Moves a repository off the old `.githooks/shared` submodule, one time. |
+| `scripts/fanout.sh` | Adds a sync commit to the open Dependabot pull requests that bump the pin. You run it on your machine. |
+| `scripts/merge-sync-prs.sh` | Merges the bump pull requests whose checks passed. You run it on your machine. |
+| `templates/` | Files to copy into a repository: the workflow, the Dependabot entry, the setup scripts, and the lines for `.githooks/.gitignore` and `.gitattributes`. |
+| `tests/` | The regression suite of the hook and the tests of the scripts. They run only here, so a repository that tracks the hook does not get them. |
 
 ## Enabling it in a repository
 
-The hook comes in as a submodule, and a repo-local shim in `.githooks` execs
-it. The shim is what lets a repository add hooks of its own later without
-giving up the shared one, and what turns "the submodule was never checked out"
-into a clear message instead of a commit that silently went unchecked.
+A repository tracks a copy of the hook at `.githooks/commit-msg`, with mode
+100755. Git runs it when `core.hooksPath` is `.githooks`. CI pins this action
+by commit sha and compares the copy with the hook of that pin. Thus each
+clone, each worktree and CI run the same hook, and nothing has to check out a
+submodule.
+
+First, add the workflow. Fill in the template with a release tag and its
+commit sha:
 
 ```sh
-git submodule add ../qoax-githooks.git .githooks/shared
-cp .githooks/shared/templates/.githooks/commit-msg .githooks/commit-msg
-chmod +x .githooks/commit-msg
-git update-index --chmod=+x .githooks/commit-msg   # git skips a hook without it
-git config core.hooksPath .githooks
+tag=v1.1.0 # a release tag
+qg="$(mktemp -d)"
+git clone -q --depth 1 --branch "$tag" https://github.com/qoax-community/qoax-githooks.git "$qg"
+sha="$(git -C "$qg" rev-parse HEAD)"
+mkdir -p .github/workflows
+sed -e "s/@QOAX_GITHOOKS_SHA@/$sha/" -e "s/@QOAX_GITHOOKS_TAG@/$tag/" \
+  "$qg/templates/.github/workflows/commit-conventions.yml" >.github/workflows/commit-conventions.yml
 ```
 
-Then give contributors something that runs on its own, so nobody has to
-remember that last line:
+Then write the copy. `sync-hook.sh` reads the pin from `.github/workflows`,
+fetches the hook of that release, and stages it with mode 100755:
 
-- **npm** — copy `templates/npm/install-git-hooks.mjs` to
-  `scripts/install-git-hooks.mjs` and add
-  `"prepare": "node scripts/install-git-hooks.mjs"` to `package.json`.
-  It runs on every `npm install`, checks the submodule out if it is empty, and
-  leaves a `core.hooksPath` somebody else set alone.
-- **anything else** — copy `templates/posix/setup-hooks.sh` to
-  `scripts/setup-hooks.sh` and call it from a `make setup` target or a
-  bootstrap script. Same behaviour, no package manager, POSIX `sh`.
+```sh
+sh "$qg/scripts/sync-hook.sh"
+```
 
-Finally, copy `templates/.github/workflows/commit-conventions.yml` for the CI
-check and `templates/.github/dependabot.yml` so the submodule pin gets bumped
-without anyone watching it.
+Git cannot run the hook with CRLF line ends. Keep it at LF in every checkout
+with the line of `templates/gitattributes` in `.gitattributes`:
 
-`qoax-app-template` carries all of this, so a repository created from the
-template starts out wired up.
+```
+/.githooks/** text eol=lf
+```
+
+Copy `templates/.github/dependabot.yml` to `.github/dependabot.yml`.
+Dependabot then moves the pin when a release comes out (see
+[Versions](#versions)). If your file already has a `github-actions` entry for
+`/`, do not add a second one. Dependabot rejects two entries with the same
+ecosystem, directory and target branch. Add the `allow` item of the template
+to the entry you have. With that item, the entry bumps no other action. Leave
+the item out if the entry must keep bumping the others. No `ignore` of the
+entry may name `qoax-community/qoax-githooks`.
+
+Last, turn the hook on and commit. The hook checks this commit too:
+
+```sh
+git config core.hooksPath .githooks
+git add .github/workflows/commit-conventions.yml .github/dependabot.yml .gitattributes
+git commit -m 'build: track a copy of the commit-msg hook'
+```
+
+Then give contributors a step that sets `core.hooksPath` on its own, so
+nobody has to remember the `git config` line:
+
+- **npm**: copy `templates/npm/install-git-hooks.mjs` to
+  `scripts/install-git-hooks.mjs`, and add
+  `"prepare": "node scripts/install-git-hooks.mjs"` to `package.json`. It runs
+  on each `npm install`. It leaves a `core.hooksPath` that somebody else set
+  alone.
+- **Anything else**: copy `templates/posix/setup-hooks.sh` to
+  `scripts/setup-hooks.sh`, and call it from a `make setup` target or a
+  bootstrap script. It does the same in POSIX `sh`, with no package manager.
+
+A repository made from `qoax-app-template` has all of this from the start.
+
+## Moving a repository off the submodule
+
+Older repositories have the hook as a submodule at `.githooks/shared`. A shim
+at `.githooks/commit-msg` runs it. In CI, most of them call the reusable
+workflow of `qoax-reusables`. Some call this action directly, at `@v1` or
+pinned to v1.0.7. `scripts/migrate-from-submodule.sh` moves such a repository
+to the tracked copy.
+
+Run it in a fresh temporary clone, on a new branch. Never run it in a
+checkout that you work in:
+
+```sh
+work="$(mktemp -d)"
+git clone -q --depth 1 https://github.com/qoax-community/qoax-githooks.git "$work/qg"
+GIT_LFS_SKIP_SMUDGE=1 git clone -q <repository url> "$work/repo"
+cd "$work/repo"
+git switch -c build/commit-msg-copy
+hooks="$(mktemp -d)"
+ln -s "$(git rev-parse --show-toplevel)/.githooks/commit-msg" "$hooks/commit-msg"
+git config core.hooksPath "$hooks"
+sh "$work/qg/scripts/migrate-from-submodule.sh" --ref v1.1.0
+```
+
+`--ref` takes a release tag, v1.1.0 or newer, or the commit sha of one.
+`GIT_LFS_SKIP_SMUDGE=1` stops the clone from downloading Git LFS files, which
+the move does not need. The folder in `core.hooksPath` holds only a link to
+the copy. So the new hook checks each commit of the script, and no other
+tracked hook runs. A tracked `pre-commit` can stop the commits, and the Git
+LFS hooks stop a push when git-lfs is not installed. The script refuses to
+run without this folder.
+
+The script makes up to three commits:
+
+- `build: track a copy of the commit-msg hook` removes the submodule and
+  `.gitmodules`, and writes the hook over the shim. It adds
+  `.githooks/.gitignore` with the line `/shared/`, and the LF rule if the hook
+  has none. It also replaces the setup scripts with the templates, and drops
+  the submodule line of `setup.cmd`.
+- `ci: pin the qoax-githooks commit check` writes the workflow with the sha
+  pin.
+- `ci: let Dependabot bump the qoax-githooks pin` replaces the Dependabot
+  entry for the submodule with one for the pin.
+
+It replaces a file only when it knows the blob. On any other blob it stops
+and prints the edit to make by hand. Commit the edit, then run the script
+again with the same `--ref`. It goes on from where it stopped.
+
+- Commit an edit before the move with `git commit --no-verify`. These are
+  edits of the shim, a setup script, `setup.cmd` or `.githooks/.gitattributes`.
+  Until the move, the shim cannot find the hook, so a plain `git commit` fails.
+- Commit an edit after the move, of the workflow or `.github/dependabot.yml`,
+  with a plain `git commit`. The new hook checks it.
+
+A setup script that the script does not know stays as it is, if it runs no
+`git submodule` command. Check by hand that it needs nothing from
+`.githooks/shared`. On a repository that has moved, the script changes
+nothing. Last, it runs a self-test, prints the diff, and lists the lines that
+still name the submodule, the shim or `qoax-reusables`. The list includes the
+lines of a setup script that it kept. Fix the docs among them by hand. The
+script never pushes.
+
+The script moves only a repository whose one submodule is `.githooks/shared`.
+Move a repository with other submodules fully by hand.
+
+After the move, an existing clone needs nothing:
+
+- `git pull`, `switch`, `merge` and `rebase` work, and the hook runs after
+  each one. `core.hooksPath` stays `.githooks`, so nobody has to run a setup
+  script again.
+- A clone that had the submodule checked out keeps it as a folder at
+  `.githooks/shared`. Nothing runs it. `.githooks/.gitignore` hides it, so
+  `git status` stays empty. The setup scripts print the clean-up below when
+  they find it.
+
+The clean-up is optional. It frees the space of the old checkout. Run it
+after the pull, in the main checkout and in each worktree that checked out
+the submodule:
+
+```sh
+rm -rf .githooks/shared "$(git rev-parse --git-dir)/modules/.githooks"
+rmdir "$(git rev-parse --git-dir)/modules" 2>/dev/null || true
+git config --remove-section submodule..githooks/shared 2>/dev/null || true
+```
+
+**Caution:** with `submodule.recurse=true`, do not delete `.githooks/shared`
+before the pull. The pull then fails with `fatal: cannot chdir`. To recover,
+run `git submodule deinit -f .githooks/shared`, then pull again.
+
+`git worktree remove` fails on a worktree that checked out the submodule. Run
+the clean-up in it first, or use `--force`.
+
+A branch from before the move still has the submodule, and it can merge as it
+is. To update it, merge main into it. Do not rebase a branch that you pushed.
 
 ## Checking messages in CI
 
-The workflow is not here. For the organization's private repositories it lives
-in [`qoax-reusables`](https://github.com/qoax-community/qoax-reusables) as a
-`workflow_call` workflow, so each repository's check is six lines and the
-version of the hook they are all checked against is pinned in one place.
-
-What runs there is the composite action at this repository's root, which calls
-`scripts/check-messages.sh`: the same hook, over a pull request's commits and
-its title — with squash merging the title becomes the subject on `main`, so it
-is held to the same rules.
-
-It is an action rather than an `actions/checkout` of this repository so that a
-caller needs one step and no knowledge of the layout, and so that it survives
-a visibility change in either repository. An organization-accessible
-repository's *actions* are downloaded with a scoped read-only token Actions
-issues itself, where a caller's `GITHUB_TOKEN` cannot read a second private
-repository at all — so the whole arrangement never needs a PAT. That path
-needs `Settings → Actions → Access` on this repository set to "Accessible from
-repositories in the organization", which is set.
-
-**A public repository has to call the action directly**, because a public
-repository may not call a `workflow_call` workflow that lives in a private one
-— and `qoax-reusables` is private. `qoax-community-website` is the
-organization's public repository and does exactly this; it is also why this
-repository is public, so that both the action and the submodule are reachable
-from it. Any repository can use this form if it would rather name its own pin
-than take the one `qoax-reusables` decides:
+Each repository runs this action in a job of its own, from
+`templates/.github/workflows/commit-conventions.yml`:
 
 ```yaml
-steps:
-  - uses: actions/checkout@v5
-    with:
-      fetch-depth: 0          # or there is no range to enumerate
-  - uses: qoax-community/qoax-githooks@v1
+jobs:
+  commit-conventions:
+    name: Conventional Commits
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # or there is no range to read
+      - name: Validate commit messages, the PR title and the hook copy
+        uses: qoax-community/qoax-githooks@<commit sha of vX.Y.Z> # vX.Y.Z
 ```
 
-The script is worth having locally too:
+The pin is a commit sha, so a tag that moves cannot change the check. The
+release is the last token of the comment, because Dependabot updates the
+comment only in that form. Rulesets require the check by the job name
+`Conventional Commits`, so keep that name.
+
+The action runs two scripts in one step, and fails if either one fails:
+
+1. `scripts/check-copy.sh` compares the copy with the hook of the pin. It
+   reads the tree of HEAD, so only committed bytes count. For a pull request,
+   HEAD is the merge commit.
+2. `scripts/check-messages.sh` runs the hook over the commits of the pull
+   request or the push, and over the pull request title. With squash merging,
+   the title becomes the subject on `main`, so the same rules apply to it.
+
+The inputs:
+
+| Input | Default | Use |
+| --- | --- | --- |
+| `copy` | `.githooks/commit-msg` | The path of the copy. An empty string turns the compare off. |
+| `stale-copy` | `error` | The level for a copy of an older release: `error` or `warning`. |
+| `range` | empty | A range to check, such as `main..HEAD`. Leave it empty in CI, and the range comes from the event. |
+| `check-pull-request-title` | `true` | Whether to check the pull request title too. |
+
+The compare goes through these cases in order:
+
+| The tree of HEAD has | Result |
+| --- | --- |
+| nothing to compare, because `copy` is empty | Pass, with a notice. |
+| a submodule under `.githooks` | The old layout passes, with the notice "not migrated yet". That layout is one submodule at `.githooks/shared`, a `.gitmodules` file and the shim at the copy path. Any other submodule there fails. |
+| no file at the copy path | Fail, with the sync command. In qoax-githooks itself, pass with a notice, because its own `commit-msg` is the hook. |
+| the shim, but no submodule | Fail. |
+| a mode other than 100755 | Fail, with the fix. |
+| the hook of the pin | Pass. The log names the release. |
+| the hook of an older release | Fail, or warn with `stale-copy: warning`. The log names the release from `scripts/hook-releases.txt`. |
+| any other content: an edit, or a release newer than the pin | Fail. |
+
+A failure prints the fix, mostly the sync command. `sync-hook.sh` writes only
+`.githooks/commit-msg`, so a `copy` at another path gets no sync command. The
+error says instead to write the `commit-msg` file of the pin to that path with
+mode 100755, or to use the default path.
+
+The rule behind the levels: a state that only a commit can cause always
+fails. A copy of an older release is the one state that a release alone can
+cause, when Dependabot moves the pin and the copy stays. So only that case
+follows `stale-copy`.
+
+A repository with no copy sets `copy: ''`. That is the only opt-out:
+
+```yaml
+      - uses: qoax-community/qoax-githooks@<commit sha of vX.Y.Z> # vX.Y.Z
+        with:
+          copy: ''
+```
+
+CI reads blobs, so it cannot see a copy that a checkout wrote with CRLF line
+ends. The LF rule in `.gitattributes` and `sync-hook.sh --check` cover that
+case.
+
+Most repositories that still use the submodule call the reusable workflow
+`commit-conventions.yml` of `qoax-reusables`. Some call this action directly,
+at `@v1` or pinned to v1.0.7. The migrate script replaces the workflows that it
+knows with the job above. For any other workflow, it stops and asks for a hand
+edit.
+
+The same checks work locally. Run them in the repository, with a clone of
+qoax-githooks:
 
 ```sh
-.githooks/shared/scripts/check-messages.sh main..HEAD
+# the messages of your branch, with the copy of the repository
+COMMIT_MSG_HOOK=.githooks/commit-msg <qoax-githooks clone>/scripts/check-messages.sh main..HEAD
+# the copy against the pin, the work tree too
+sh <qoax-githooks clone>/scripts/sync-hook.sh --check
 ```
 
 ## Versions
 
-Releases are tagged `vN.N.N`, and `vN` moves to the newest release in that
-line. The reusable workflow follows `v1`, so a new rule reaches every
-repository's CI as soon as it is released, without a pull request per
-repository. The submodule pin does not move on its own — that is Dependabot's
-job — so a contributor's local hook can lag behind CI for as long as it takes
-to merge the bump.
+Releases have tags `vX.Y.Z`. Each repository pins one release by commit sha,
+so a new release reaches a repository only through a pull request there. The
+pin and the copy move in the same pull request. Thus the hook that runs
+locally is the hook that CI checks with.
 
-That asymmetry is deliberate: CI is the gate, and the gate should not be
-something a repository can weaken by pinning an old hook.
+`v1` stays at v1.0.7, for the callers that have not moved off it. New
+releases do not move it.
 
-## Why the tests stay behind
+How a release reaches each repository:
 
-A submodule brings a whole repository at a commit; there is no way to ask for
-part of one. So the suite — five shell files, about 24 KB against the hook's
-56 KB — does land in every consuming checkout. Nothing there runs it, nothing
-imports it, and no consuming workflow references it.
+1. Dependabot looks for a new release once a week. It opens a pull request in
+   each repository that changes `@<old sha> # vA` to `@<new sha> # vB`. The
+   `allow` list in `templates/.github/dependabot.yml` keeps it to this action.
+2. If the release kept `commit-msg`, the compare passes. Merge the pull
+   requests by hand, or with `scripts/merge-sync-prs.sh`.
+3. If the release changed `commit-msg`, the compare fails and prints the sync
+   command. Run `scripts/fanout.sh`. It adds one sync commit to each pull
+   request. Then merge them.
+4. After a sync commit, Dependabot stops rebasing that pull request. If a
+   newer release replaces the pull request, Dependabot opens a new one, and
+   the sync must run again.
 
-Keeping it out entirely would mean publishing the hook to an orphan branch and
-pointing submodules at that instead, which buys a slightly smaller checkout in
-exchange for a release step between writing a fix and being able to use it.
-Not worth it at this size. If the tradeoff ever changes, the branch is the
-mechanism.
+## Releasing
+
+A tag starts a bump pull request in every repository that pins the action.
+So push a tag only for a real release.
+
+1. Each release has one line in `scripts/hook-releases.txt`: the tag and the
+   blob of `commit-msg`. If the release changes the hook, the pull request of
+   that change added the line (see
+   [Working on the hook](#working-on-the-hook)). For a release that keeps the
+   hook, the release pull request adds the line, with the blob of the release
+   before it. This prints the blob:
+
+   ```sh
+   git hash-object --no-filters commit-msg
+   ```
+
+   `tests/releases.sh` fails when the last line is not the current
+   `commit-msg`, or when a tag has no line.
+
+2. After the merge, tag the merge commit and push the tag:
+
+   ```sh
+   git tag -a vX.Y.Z -m 'vX.Y.Z: <what changed>' <merge sha>
+   git push origin vX.Y.Z
+   ```
+
+   Do not move `v1`. Optionally, run `gh release create vX.Y.Z --verify-tag`,
+   so that the Dependabot pull requests show release notes.
+
+3. Handle the bump pull requests (see [Versions](#versions)) with the
+   helpers. They need git, and `gh` with a login that can push and merge.
+   Without `--apply`, each one does a dry run:
+
+   ```sh
+   sh scripts/fanout.sh                     # a dry run: commit in clones, push nothing
+   sh scripts/fanout.sh --apply             # push, after one OK at the terminal
+   sh scripts/fanout.sh --apply --batch 5   # one OK for each 5 branches
+   sh scripts/fanout.sh --ref vX.Y.Z        # a branch of its own, when Dependabot opened no pull request
+   sh scripts/merge-sync-prs.sh             # a dry run: list the pull requests and their checks
+   sh scripts/merge-sync-prs.sh --apply     # merge the green ones, after one OK
+   ```
+
+   `sh scripts/fanout.sh --list` prints the repositories that both helpers
+   work on. Give `owner/name` arguments to work on some of them only.
+
+`fanout.sh` clones each repository into a temporary folder. On the head
+branch of the Dependabot pull request, it commits
+`chore: sync the commit-msg hook to vX.Y.Z`. A head branch that is behind its
+base gets a merge of the base first. It never rebases and never force-pushes.
+
+With `--ref`, `fanout.sh` works on the branch `chore/qoax-githooks-sync`
+instead, from the default branch. One commit there moves the pin and the
+copy, with the subject
+`chore: bump qoax-githooks to vX.Y.Z and sync the commit-msg hook`. When
+only one of them changes, the subject names only that one. With `--apply`, it
+pushes the branch, but it opens no pull request. Open it yourself.
+
+`merge-sync-prs.sh` lists the Dependabot pull requests that bump the pin, and
+the pull requests from `chore/qoax-githooks-sync`. It merges only the ones
+whose checks all passed. It stops a merge when the head moved after the list.
 
 ## Working on the hook
 
@@ -186,9 +428,10 @@ still has a directory in it. Run the line again if the checkout moves.
 Then the suite:
 
 ```sh
-tests/run.sh                    # the whole suite against the tracked hook
-tests/run.sh path/to/other-copy # against another copy
-tests/cases.sh ./commit-msg     # one suite
+tests/run.sh                     # the whole suite against the tracked hook
+tests/run.sh path/to/other-copy  # against another copy
+bash tests/cases.sh ./commit-msg # one suite
+tests/tools.sh                   # the tests of the scripts
 ```
 
 `cases.sh` asserts exit codes and findings, `negatives.sh` pins messages that
@@ -196,6 +439,22 @@ must **not** be rejected, `scissors.sh` covers what git keeps below a scissors
 line across cleanup modes and comment characters, and `fuzz.sh` throws
 degenerate messages at every cleanup mode looking for a crash or a leaked
 shell diagnostic.
+
+`tests/tools.sh` runs the tests of `scripts/`. A POSIX script must work under
+dash, the `/bin/sh` of ubuntu-latest, so each of its tests runs under dash and
+under bash. The tests need no network. Bare repositories and `file://` URLs
+stand in for GitHub, through `QOAX_GITHOOKS_URL` and a fake `gh` that refuses
+every write. `tests/releases.sh` also compares `scripts/hook-releases.txt`
+with the release tags. Outside Actions, a clone with no tags skips that part,
+so run `git fetch --tags` first. In Actions, a clone with no tags fails it, so
+the CI job checks out with `fetch-depth: 0`. CI runs `tests/run.sh` and
+`tests/tools.sh` on every pull request.
+
+A pull request that changes `commit-msg` must also add the line of the next
+release to `scripts/hook-releases.txt`, with the new blob. If that line is
+there already, update its blob. `tests/releases.sh` fails until the last line
+names the current hook. With that line, the compare in CI can name the
+release of a copy.
 
 Two rules about changing the hook:
 

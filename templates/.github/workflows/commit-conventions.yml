@@ -1,8 +1,11 @@
-# Copy this into a repository as .github/workflows/commit-conventions.yml.
+# Checks the commit messages and the title of a pull request with the
+# commit-msg hook of qoax-githooks. The action also compares the tracked copy
+# at .githooks/commit-msg with the hook of the release that it pins.
 #
-# The check itself lives in qoax-community/qoax-reusables, which pins the
-# version of the hook every repository is checked against, so a new rule
-# reaches all of them in one pull request there.
+# The pin is a commit sha, and the comment after it names the release.
+# Dependabot moves both, but it updates the comment only while the release is
+# its last token. When a bump changes the hook, the compare fails and prints
+# the command that writes the new hook into the copy.
 name: Check commit conventions
 
 on:
@@ -14,10 +17,10 @@ on:
 permissions:
   contents: read
 
-# A pull request may cancel its own earlier run: the next one re-checks the
-# whole range. A push may not — it is checked over the range it pushed, so
-# cancelling it would leave those commits unchecked by anything. Give each push
-# a group of its own instead.
+# A pull request may cancel its own earlier run, because the next run checks
+# the whole range again. A push may not. Its run checks only the range that it
+# pushed, so a cancel leaves those commits unchecked. Thus each push gets a
+# group of its own.
 concurrency:
   group: >-
     commit-conventions-${{ github.event.pull_request.number
@@ -26,4 +29,15 @@ concurrency:
 
 jobs:
   commit-conventions:
-    uses: qoax-community/qoax-reusables/.github/workflows/commit-conventions.yml@main
+    # A ruleset can require this check by its name.
+    name: Conventional Commits
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The action reads a range of commits, and a shallow clone has none.
+          fetch-depth: 0
+
+      - name: Validate commit messages, the PR title and the hook copy
+        uses: qoax-community/qoax-githooks@@QOAX_GITHOOKS_SHA@ # @QOAX_GITHOOKS_TAG@

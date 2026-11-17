@@ -20,17 +20,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The hook's regression suite. It lives here and runs only here: repositories
-  # that consume the hook get the hook, not its tests.
+  # The regression suite of the hook and the tests of the scripts. They run
+  # only here. A repository that tracks the hook gets the hook, not its tests.
   tests:
     name: commit-msg suite
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # tests/releases.sh compares the manifest with the release tags, and
+          # a shallow checkout has no tags.
+          fetch-depth: 0
 
       - name: Run the suite
         run: tests/run.sh
+
+      # A failed suite must not hide the results of the tool tests.
+      - name: Run the tool tests
+        if: ${{ !cancelled() }}
+        run: tests/tools.sh
 
   # The hook checks this repository's own messages, with the copy under review
   # rather than a released one — a change that stops enforcing a rule shows up
@@ -48,7 +57,95 @@ jobs:
           fetch-depth: 0
 
       # Through the action, which is how every other repository reaches this
-      # check. A malformed action.yml would otherwise only be discovered by
-      # whoever bumped the pin in qoax-reusables.
+      # check. A malformed action.yml would otherwise show up first in the
+      # bump pull requests of every repository that pins the action.
       - name: Validate commit messages and pull request title
         uses: ./
+
+  # tests/copy.sh runs check-copy.sh directly. Only this job proves that
+  # action.yml passes the inputs to it and fails on its exit status. Each step
+  # commits a fixture to the runner checkout, then runs the action on it.
+  #
+  # The range HEAD..HEAD is empty and the title check is off, so only the
+  # compare can fail the action. The range of the event is not in a depth-1
+  # checkout, and a failed message check would hide the result of the compare.
+  copy-check:
+    name: copy check through the action
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Commit a copy of the hook
+        run: |
+          mkdir -p .githooks
+          cp commit-msg .githooks/commit-msg
+          git add --chmod=+x .githooks/commit-msg
+          git -c user.name=fixture -c user.email=fixture@example.invalid \
+            commit -q -m 'test: track a copy of the hook'
+
+      - name: Expect the copy to pass
+        uses: ./
+        with:
+          range: HEAD..HEAD
+          check-pull-request-title: 'false'
+
+      - name: Commit an edited copy
+        run: |
+          printf '# edited\n' >>.githooks/commit-msg
+          git add --chmod=+x .githooks/commit-msg
+          git -c user.name=fixture -c user.email=fixture@example.invalid \
+            commit -q -m 'test: edit the copy of the hook'
+
+      # The error annotation of this step is expected.
+      - name: Run the action on the edited copy
+        id: edited
+        continue-on-error: true
+        uses: ./
+        with:
+          range: HEAD..HEAD
+          check-pull-request-title: 'false'
+
+      - name: Expect the edited copy to fail
+        env:
+          OUTCOME: ${{ steps.edited.outcome }}
+        run: |
+          if [ "$OUTCOME" != failure ]; then
+            printf '::error::The action gave %s for an edited copy, not failure.\n' "$OUTCOME"
+            exit 1
+          fi
+
+      - name: Commit another edit of the copy
+        run: |
+          printf '# edited again\n' >>.githooks/commit-msg
+          git add --chmod=+x .githooks/commit-msg
+          git -c user.name=fixture -c user.email=fixture@example.invalid \
+            commit -q -m 'test: edit the copy of the hook again'
+
+      # The compare fails on this copy. So a pass proves that the runner keeps
+      # an empty input empty, and that copy: '' turns the compare off.
+      - name: Expect an empty copy input to skip the compare
+        uses: ./
+        with:
+          copy: ''
+          range: HEAD..HEAD
+          check-pull-request-title: 'false'
+
+      # The gitlink can name any commit, because nothing checks it out.
+      - name: Commit the old submodule layout
+        run: |
+          cp tests/fixtures/shim .githooks/commit-msg
+          git add --chmod=+x .githooks/commit-msg
+          git config -f .gitmodules submodule..githooks/shared.path .githooks/shared
+          git config -f .gitmodules submodule..githooks/shared.url ../qoax-githooks.git
+          git add .gitmodules
+          git update-index --add --cacheinfo "160000,$(git rev-parse HEAD),.githooks/shared"
+          git -c user.name=fixture -c user.email=fixture@example.invalid \
+            commit -q -m 'test: go back to the submodule layout'
+
+      # The log must show the notice "not migrated yet".
+      - name: Expect the old layout to pass
+        uses: ./
+        with:
+          range: HEAD..HEAD
+          check-pull-request-title: 'false'

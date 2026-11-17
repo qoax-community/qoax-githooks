@@ -1,0 +1,10 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      # Conventional Commits, because the CI of this repository checks
+      # Dependabot's messages with the hook too.
+      prefix: ci

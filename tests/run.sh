@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
-# Every check for .githooks/commit-msg. Run it from anywhere:
+# Every check for the commit-msg hook at the repository root. Run it from
+# anywhere:
 #
-#   tests/commit-msg/run.sh              # against the tracked hook
-#   tests/commit-msg/run.sh path/to/hook # against another copy
+#   tests/run.sh              # against the tracked hook
+#   tests/run.sh path/to/hook # against another copy
 #
 # Each suite prints its cases and ends with "failures: N"; this sums them and
 # exits non-zero if any suite failed.
