@@ -17,7 +17,7 @@ set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 
 bash_tests='copy.sh releases.sh'
-posix_tests=''
+posix_tests='templates.sh'
 
 output="$(mktemp)"
 trap 'rm -f "$output"' EXIT

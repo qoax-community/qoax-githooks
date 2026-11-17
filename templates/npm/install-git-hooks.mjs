@@ -2,9 +2,9 @@
 //
 // Points git at the repo's tracked hooks, so commit conventions apply without
 // every contributor having to remember `git config core.hooksPath .githooks`.
-// The shared hook itself comes from the qoax-githooks submodule under
-// .githooks/shared, which a fresh clone leaves empty, so this checks it out
-// first.
+// The hook is a tracked copy at .githooks/commit-msg, so every checkout has it.
+// For a clone that still holds a checkout of the old qoax-githooks submodule,
+// this prints how to delete it.
 //
 // Copy this file into a repository as scripts/install-git-hooks.mjs and run it
 // from package.json's `prepare` script, i.e. on every `npm install`.
@@ -15,7 +15,6 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 
 const HOOKS_PATH = '.githooks';
-const SUBMODULE = '.githooks/shared';
 
 /**
  * Run git, returning stdout without the newline git terminates it with, or
@@ -37,16 +36,22 @@ if (git('rev-parse', '--is-inside-work-tree') !== 'true') {
   process.exit(0);
 }
 
-// The shim under .githooks execs the submodule's copy of the hook, and a clone
-// without `--recurse-submodules` has not fetched it yet.
-if (!existsSync(`${SUBMODULE}/commit-msg`)) {
-  if (git('submodule', 'update', '--init', SUBMODULE) === null) {
-    console.warn(
-      `! could not check out ${SUBMODULE}, commit message validation is off\n` +
-        `  run \`git submodule update --init ${SUBMODULE}\` and try again`,
-    );
-    process.exit(0);
-  }
+// A clone that used the old submodule keeps its checkout after the pull that
+// removes the submodule. Nothing runs it, and .githooks/.gitignore hides it.
+// Its removal is optional, so the script only says how.
+const top = git('rev-parse', '--show-toplevel');
+if (
+  top !== null &&
+  existsSync(`${top}/.githooks/shared/.git`) &&
+  git('-C', top, 'ls-files', '-s', '--', '.githooks/shared') === ''
+) {
+  console.warn(
+    `note: .githooks/shared is a leftover checkout of the old qoax-githooks submodule.\n` +
+      `  Nothing uses it now. To delete it, run these lines in ${top}:\n` +
+      `    rm -rf .githooks/shared "$(git rev-parse --git-dir)/modules/.githooks"\n` +
+      `    rmdir "$(git rev-parse --git-dir)/modules" 2>/dev/null || true\n` +
+      `    git config --remove-section submodule..githooks/shared 2>/dev/null || true`,
+  );
 }
 
 const configured = git('config', '--get', 'core.hooksPath');
@@ -55,14 +60,14 @@ if (configured === HOOKS_PATH) {
   process.exit(0);
 }
 
-// Someone with their own hooks directory made a deliberate choice; say what
-// that costs them rather than overwriting it. `null` is the only "not set"
-// answer — an empty string is a value somebody wrote, and it disables hooks.
+// Someone with their own hooks directory made a deliberate choice. Say what
+// that costs them, and do not overwrite it. Only `null` means "not set". An
+// empty string is a value somebody wrote, and it turns hooks off.
 if (configured !== null) {
   const shown = configured === '' ? 'an empty value' : `"${configured}"`;
   console.warn(
     `! core.hooksPath is set to ${shown}, leaving it alone.\n` +
-      `  commit message validation is off — run \`git config core.hooksPath ${HOOKS_PATH}\` to enable it.`,
+      `  commit message validation is off. Run \`git config core.hooksPath ${HOOKS_PATH}\` to turn it on.`,
   );
   process.exit(0);
 }
