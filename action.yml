@@ -1,18 +1,17 @@
 name: Check commit conventions
 description: >-
-  Runs this repository's commit-msg hook over the commits a pull request or
-  push added, and over a pull request's title.
+  Compares the caller's tracked copy of the commit-msg hook with this
+  release's hook, then runs the hook over the commits a pull request or push
+  added, and over a pull request's title.
 author: Qoax Community
 
 # The action lives at the repository root so github.action_path is the checkout
-# itself: the hook and scripts/check-messages.sh sit right beside this file.
+# itself: the hook and the scripts sit right beside this file.
 #
-# The check is packaged as an action rather than as an `actions/checkout` of
-# this repository so that a caller needs one step and no knowledge of the
-# layout, and so that it keeps working whatever this repository's visibility
-# is: an organization-accessible repository's actions are downloaded with a
-# scoped read-only installation token Actions issues itself, where a caller's
-# GITHUB_TOKEN cannot read a second private repository at all.
+# The check is an action, not an `actions/checkout` of this repository. Thus a
+# caller needs one step and no knowledge of the layout. The sha pin of that
+# step also names the one hook release that the caller's copy must equal. When
+# Dependabot moves the pin, the compare shows whether the copy must change too.
 #
 # The caller must have checked itself out with fetch-depth: 0, or there is no
 # range to enumerate.
@@ -31,11 +30,28 @@ inputs:
       same rules.
     required: false
     default: 'true'
+  copy:
+    description: >-
+      The path of the tracked copy of the commit-msg hook, from the repository
+      root. The check compares the copy in the tree of HEAD with the hook of
+      this action. An empty string turns the compare off. That is the only
+      opt-out, for a repository with no copy.
+    required: false
+    default: .githooks/commit-msg
+  stale-copy:
+    description: >-
+      The level for a copy that is an older release of the hook: error or
+      warning. Every other mismatch is an error, because only a commit can
+      cause it.
+    required: false
+    default: error
 
 runs:
   using: composite
   steps:
-    - name: Validate commit messages and pull request title
+    # One step runs both scripts, so a failed compare does not hide the
+    # message results, and no step needs if: always().
+    - name: Check the hook copy, the commit messages and the pull request title
       shell: bash
       env:
         EVENT_NAME: ${{ github.event_name }}
@@ -51,7 +67,16 @@ runs:
         # Dependabot's title gets the waivers its commits do.
         PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         RANGE: ${{ inputs.range }}
+        # Through the environment for the same reason as the title.
+        COPY: ${{ inputs.copy }}
+        STALE_COPY: ${{ inputs.stale-copy }}
       run: |
         set -uo pipefail
+        status=0
+        # check-copy.sh gives its defaults to unset variables only. An empty
+        # input must stay empty, because an empty copy turns the compare off.
+        COPY="${COPY-}" STALE_COPY="${STALE_COPY-}" \
+          "${{ github.action_path }}/scripts/check-copy.sh" || status=1
         # shellcheck disable=SC2086
-        "${{ github.action_path }}/scripts/check-messages.sh" $RANGE
+        "${{ github.action_path }}/scripts/check-messages.sh" $RANGE || status=1
+        exit "$status"
