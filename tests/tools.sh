@@ -16,7 +16,7 @@ set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 
-bash_tests='copy.sh releases.sh'
+bash_tests='copy.sh releases.sh messages.sh'
 posix_tests='templates.sh sync.sh migrate.sh fanout.sh'
 
 output="$(mktemp)"
