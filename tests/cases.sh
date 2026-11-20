@@ -414,4 +414,25 @@ t "dependabot title, no type" 1 'Bump the dev-tooling group across 1 directory w
 unset COMMIT_MSG_FROM_DEPENDABOT
 t "same title from anybody else" 1 'chore(deps-dev): bump the dev-tooling group across 1 directory with 9 updates'
 
+echo "--- the advice for an unknown type ---"
+# Each repository tracks a copy that CI compares with a release, so an edit of
+# the copy fails CI. The advice must send people to qoax-githooks instead.
+printf 'wibble: do a thing' > "$D/m"
+out="$(NO_COLOR=1 COMMIT_MSG_REPORT_ONLY=1 "$H" "$D/m" 2>&1)"
+case "$out" in
+  *'add it to DEFAULT_TYPES in qoax-community/qoax-githooks'*)
+    printf 'ok   %s\n' 'the fix names qoax-githooks' ;;
+  *) printf 'FAIL %s\n' 'the fix names qoax-githooks'; fails=$((fails + 1)) ;;
+esac
+# CI never sets commitMsg.types. A default type that a narrower local list
+# leaves out passes in CI, so the fix is local.
+printf 'docs: fix a typo' > "$D/m"
+out="$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commitMsg.types GIT_CONFIG_VALUE_0='feat fix' \
+  NO_COLOR=1 COMMIT_MSG_REPORT_ONLY=1 "$H" "$D/m" 2>&1)"
+case "$out" in
+  *'commitMsg.types of this clone leaves out "docs"'*)
+    printf 'ok   %s\n' 'a default type left out locally gets a local fix' ;;
+  *) printf 'FAIL %s\n' 'a default type left out locally gets a local fix'; fails=$((fails + 1)) ;;
+esac
+
 echo "failures: $fails"
