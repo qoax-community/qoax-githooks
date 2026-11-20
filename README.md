@@ -83,7 +83,7 @@ First, add the workflow. Fill in the template with a release tag and its
 commit sha:
 
 ```sh
-tag=v1.1.0 # a release tag
+tag=v1.1.1 # a release tag
 qg="$(mktemp -d)"
 git clone -q --depth 1 --branch "$tag" https://github.com/qoax-community/qoax-githooks.git "$qg"
 sha="$(git -C "$qg" rev-parse HEAD)"
@@ -146,11 +146,14 @@ A repository made from `qoax-app-template` has all of this from the start.
 
 ## Moving a repository off the submodule
 
-Older repositories have the hook as a submodule at `.githooks/shared`. A shim
-at `.githooks/commit-msg` runs it. In CI, most of them call the reusable
-workflow of `qoax-reusables`. Some call this action directly, at `@v1` or
-pinned to v1.0.7. `scripts/migrate-from-submodule.sh` moves such a repository
-to the tracked copy.
+Before v1.1.0, each repository had the hook as a submodule at
+`.githooks/shared`, and a shim at `.githooks/commit-msg` ran it. In CI, most of
+them called the reusable workflow `commit-conventions.yml` of
+`qoax-reusables`. Some called this action directly, at `@v1` or pinned to
+v1.0.7. All repositories of the organization moved to the tracked copy, and
+qoax-reusables no longer has the reusable workflow.
+`scripts/migrate-from-submodule.sh` moves any other repository with that
+layout to the tracked copy.
 
 Run it in a fresh temporary clone, on a new branch. Never run it in a
 checkout that you work in:
@@ -164,7 +167,7 @@ git switch -c build/commit-msg-copy
 hooks="$(mktemp -d)"
 ln -s "$(git rev-parse --show-toplevel)/.githooks/commit-msg" "$hooks/commit-msg"
 git config core.hooksPath "$hooks"
-sh "$work/qg/scripts/migrate-from-submodule.sh" --ref v1.1.0
+sh "$work/qg/scripts/migrate-from-submodule.sh" --ref v1.1.1
 ```
 
 `--ref` takes a release tag, v1.1.0 or newer, or the commit sha of one.
@@ -345,11 +348,11 @@ CI reads blobs, so it cannot see a copy that a checkout wrote with CRLF line
 ends. The LF rule in `.gitattributes` and `sync-hook.sh --check` cover that
 case.
 
-Most repositories that still use the submodule call the reusable workflow
-`commit-conventions.yml` of `qoax-reusables`. Some call this action directly,
-at `@v1` or pinned to v1.0.7. The migrate script replaces the workflows that it
-knows with the job above. For any other workflow, it stops and asks for a hand
-edit.
+A repository with the old layout calls this action at `@v1` or pinned to
+v1.0.7. Or it calls the reusable workflow `commit-conventions.yml` of
+`qoax-reusables`, which no longer exists. The migrate script replaces the
+workflows that it knows with the job above. For any other workflow, it stops
+and asks for a hand edit.
 
 The same checks work locally. Run them in the repository, with a clone of
 qoax-githooks:
