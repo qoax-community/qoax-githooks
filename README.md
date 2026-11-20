@@ -135,6 +135,13 @@ nobody has to remember the `git config` line:
   `scripts/setup-hooks.sh`, and call it from a `make setup` target or a
   bootstrap script. It does the same in POSIX `sh`, with no package manager.
 
+With the POSIX script, also add the line of `templates/posix/gitattributes`
+to `.gitattributes`. Git for Windows sets `core.autocrlf=true`, and with no
+rule a checkout writes the script with CRLF. Then `sh` cannot run it. A clone
+made before the rule keeps the CRLF script, because git does not write it
+again. In such a clone, delete `scripts/setup-hooks.sh`, then run
+`git checkout -- scripts/setup-hooks.sh`.
+
 A repository made from `qoax-app-template` has all of this from the start.
 
 ## Moving a repository off the submodule
@@ -174,7 +181,9 @@ The script makes up to three commits:
   `.gitmodules`, and writes the hook over the shim. It adds
   `.githooks/.gitignore` with the line `/shared/`, and the LF rule if the hook
   has none. It also replaces the setup scripts with the templates, and drops
-  the submodule line of `setup.cmd`.
+  the submodule line of `setup.cmd`. It does not add the line of
+  `templates/posix/gitattributes`. If the repository has
+  `scripts/setup-hooks.sh`, add that line to `.gitattributes` by hand.
 - `ci: pin the qoax-githooks commit check` writes the workflow with the sha
   pin.
 - `ci: let Dependabot bump the qoax-githooks pin` replaces the Dependabot

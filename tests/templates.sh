@@ -266,5 +266,42 @@ case "$attrs" in
   *) fail 'the gitattributes rule gives the copy eol=lf' "$attrs" ;;
 esac
 
+# Git for Windows sets core.autocrlf=true by default. Without the rule, a
+# checkout writes the setup script with CRLF, and sh cannot run it.
+printf '/scripts/setup-hooks.sh text eol=lf\n' >"$T/want-posix-gitattributes"
+if cmp -s "$T/want-posix-gitattributes" "$templates/posix/gitattributes"; then
+  pass 'templates/posix/gitattributes is the one line'
+else
+  fail 'templates/posix/gitattributes is the one line' "$(cat "$templates/posix/gitattributes")"
+fi
+fresh
+mkdir -p "$repo/scripts"
+cp "$posix" "$repo/scripts/setup-hooks.sh"
+git -C "$repo" add scripts/setup-hooks.sh
+git -C "$repo" commit -q --no-verify -m 'build: add the setup script'
+rm -rf "$T/crlf"
+git clone -q -c core.autocrlf=true "$repo" "$T/crlf"
+if grep -q "$(printf '\r')" "$T/crlf/scripts/setup-hooks.sh"; then
+  pass 'with no rule, core.autocrlf=true writes the setup script with CRLF'
+else
+  fail 'with no rule, core.autocrlf=true writes the setup script with CRLF'
+fi
+cp "$templates/posix/gitattributes" "$repo/.gitattributes"
+git -C "$repo" add .gitattributes
+git -C "$repo" commit -q --no-verify -m 'build: keep the setup script at LF'
+rm -rf "$T/crlf"
+git clone -q -c core.autocrlf=true "$repo" "$T/crlf"
+if grep -q "$(printf '\r')" "$T/crlf/scripts/setup-hooks.sh"; then
+  fail 'with the rule, core.autocrlf=true writes the setup script with LF'
+else
+  pass 'with the rule, core.autocrlf=true writes the setup script with LF'
+fi
+if (cd "$T/crlf" && "$test_shell" scripts/setup-hooks.sh >/dev/null 2>&1) &&
+  [ "$(git -C "$T/crlf" config --get core.hooksPath)" = .githooks ]; then
+  pass 'the setup script of that clone sets core.hooksPath'
+else
+  fail 'the setup script of that clone sets core.hooksPath'
+fi
+
 echo "failures: $fails"
 [ "$fails" -eq 0 ]
