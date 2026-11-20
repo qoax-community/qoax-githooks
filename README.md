@@ -216,13 +216,20 @@ After the move, an existing clone needs nothing:
   each one. `core.hooksPath` stays `.githooks`, so nobody has to run a setup
   script again.
 - A clone that had the submodule checked out keeps it as a folder at
-  `.githooks/shared`. Nothing runs it. `.githooks/.gitignore` hides it, so
-  `git status` stays empty. The setup scripts print the clean-up below when
-  they find it.
+  `.githooks/shared`. On main, and on each branch that merged main, nothing
+  runs it. `.githooks/.gitignore` hides it, so `git status` stays empty. The
+  setup scripts print the clean-up below when they find it.
 
-The clean-up is optional. It frees the space of the old checkout. Run it
-after the pull, in the main checkout and in each worktree that checked out
-the submodule:
+The clean-up is optional. It frees the space of the old checkout.
+
+Before the clean-up, merge main into each branch that you still commit on.
+A branch from before the move has the shim at `.githooks/commit-msg`, and the
+shim runs the hook in `.githooks/shared`. After the clean-up, each commit on
+such a branch fails with `commit message validation is not installed`. The
+setup scripts print the clean-up with no such warning.
+
+Run the clean-up after the pull, in the main checkout and in each worktree
+that checked out the submodule:
 
 ```sh
 rm -rf .githooks/shared "$(git rev-parse --git-dir)/modules/.githooks"
@@ -230,9 +237,30 @@ rmdir "$(git rev-parse --git-dir)/modules" 2>/dev/null || true
 git config --remove-section submodule..githooks/shared 2>/dev/null || true
 ```
 
+If a commit on an old branch fails after the clean-up, run
+`git submodule update --init .githooks/shared`, as the error says. This works
+with staged changes. Or merge main into the branch. The merge brings the
+copy, and the hook lets the merge message of git through. A merge that makes
+a merge commit stops when changes are staged. So run `git stash` before the
+merge and `git stash pop --index` after it.
+
 **Caution:** with `submodule.recurse=true`, do not delete `.githooks/shared`
 before the pull. The pull then fails with `fatal: cannot chdir`. To recover,
 run `git submodule deinit -f .githooks/shared`, then pull again.
+
+With `submodule.recurse=true`, a clone made with
+`git clone --recurse-submodules` needs one more line in the clean-up:
+
+```sh
+git config --unset-all submodule.active '^\.$' 2>/dev/null || true
+```
+
+Without it, `git switch` to a branch from before the move fails with
+`could not reset submodule index`. The work tree then stays half switched.
+`git reset --hard` is part of the recovery, and it discards the changes that
+are not committed. Save them first. Then run
+`rm -rf .gitmodules .githooks/shared`, `git reset --hard` and the line above,
+and switch again.
 
 `git worktree remove` fails on a worktree that checked out the submodule. Run
 the clean-up in it first, or use `--force`.
