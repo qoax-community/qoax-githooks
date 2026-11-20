@@ -647,12 +647,19 @@ check_type() {
   local lowercase="${SUBJECT_TYPE,,}"
 
   if ! is_known_type "$lowercase"; then
-    local suggestion
+    local suggestion fix
     suggestion="$(suggest_type "$lowercase")"
+    # TYPES comes from commitMsg.types when it is set, and CI never sets it.
+    # So a default type that only this clone leaves out needs a local fix.
+    if [[ " ${DEFAULT_TYPES[*]} " == *" ${lowercase} "* ]]; then
+      fix="commitMsg.types of this clone leaves out \"${lowercase}\", and CI accepts it. Add it to commitMsg.types, or unset commitMsg.types"
+    else
+      fix="to allow \"${lowercase}\" in every repo, add it to DEFAULT_TYPES in qoax-community/qoax-githooks. CI rejects an edited .githooks/commit-msg, and commitMsg.types only changes your own clone"
+    fi
     error subject "unknown type \"${SUBJECT_TYPE}\"" \
       --at 1 1 "${#SUBJECT_TYPE}" \
       --why "the spec allows any noun (§1, §14); this repo keeps to a list so changelog tooling stays predictable: $(list_types)" \
-      --fix "${suggestion:+did you mean \"${suggestion}\"? — }add it to DEFAULT_TYPES in .githooks/commit-msg for the whole repo; commitMsg.types only changes your own clone"
+      --fix "${suggestion:+did you mean \"${suggestion}\"? — }${fix}"
 
   elif [[ $SUBJECT_TYPE != "$lowercase" ]]; then
     error subject "type \"${SUBJECT_TYPE}\" is not lowercase" \

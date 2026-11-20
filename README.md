@@ -83,7 +83,7 @@ First, add the workflow. Fill in the template with a release tag and its
 commit sha:
 
 ```sh
-tag=v1.1.0 # a release tag
+tag=v1.1.1 # a release tag
 qg="$(mktemp -d)"
 git clone -q --depth 1 --branch "$tag" https://github.com/qoax-community/qoax-githooks.git "$qg"
 sha="$(git -C "$qg" rev-parse HEAD)"
@@ -135,15 +135,25 @@ nobody has to remember the `git config` line:
   `scripts/setup-hooks.sh`, and call it from a `make setup` target or a
   bootstrap script. It does the same in POSIX `sh`, with no package manager.
 
+With the POSIX script, also add the line of `templates/posix/gitattributes`
+to `.gitattributes`. Git for Windows sets `core.autocrlf=true`, and with no
+rule a checkout writes the script with CRLF. Then `sh` cannot run it. A clone
+made before the rule keeps the CRLF script, because git does not write it
+again. In such a clone, delete `scripts/setup-hooks.sh`, then run
+`git checkout -- scripts/setup-hooks.sh`.
+
 A repository made from `qoax-app-template` has all of this from the start.
 
 ## Moving a repository off the submodule
 
-Older repositories have the hook as a submodule at `.githooks/shared`. A shim
-at `.githooks/commit-msg` runs it. In CI, most of them call the reusable
-workflow of `qoax-reusables`. Some call this action directly, at `@v1` or
-pinned to v1.0.7. `scripts/migrate-from-submodule.sh` moves such a repository
-to the tracked copy.
+Before v1.1.0, each repository had the hook as a submodule at
+`.githooks/shared`, and a shim at `.githooks/commit-msg` ran it. In CI, most of
+them called the reusable workflow `commit-conventions.yml` of
+`qoax-reusables`. Some called this action directly, at `@v1` or pinned to
+v1.0.7. All repositories of the organization moved to the tracked copy, and
+qoax-reusables no longer has the reusable workflow.
+`scripts/migrate-from-submodule.sh` moves any other repository with that
+layout to the tracked copy.
 
 Run it in a fresh temporary clone, on a new branch. Never run it in a
 checkout that you work in:
@@ -157,7 +167,7 @@ git switch -c build/commit-msg-copy
 hooks="$(mktemp -d)"
 ln -s "$(git rev-parse --show-toplevel)/.githooks/commit-msg" "$hooks/commit-msg"
 git config core.hooksPath "$hooks"
-sh "$work/qg/scripts/migrate-from-submodule.sh" --ref v1.1.0
+sh "$work/qg/scripts/migrate-from-submodule.sh" --ref v1.1.1
 ```
 
 `--ref` takes a release tag, v1.1.0 or newer, or the commit sha of one.
@@ -174,7 +184,9 @@ The script makes up to three commits:
   `.gitmodules`, and writes the hook over the shim. It adds
   `.githooks/.gitignore` with the line `/shared/`, and the LF rule if the hook
   has none. It also replaces the setup scripts with the templates, and drops
-  the submodule line of `setup.cmd`.
+  the submodule line of `setup.cmd`. It does not add the line of
+  `templates/posix/gitattributes`. If the repository has
+  `scripts/setup-hooks.sh`, add that line to `.gitattributes` by hand.
 - `ci: pin the qoax-githooks commit check` writes the workflow with the sha
   pin.
 - `ci: let Dependabot bump the qoax-githooks pin` replaces the Dependabot
@@ -207,13 +219,20 @@ After the move, an existing clone needs nothing:
   each one. `core.hooksPath` stays `.githooks`, so nobody has to run a setup
   script again.
 - A clone that had the submodule checked out keeps it as a folder at
-  `.githooks/shared`. Nothing runs it. `.githooks/.gitignore` hides it, so
-  `git status` stays empty. The setup scripts print the clean-up below when
-  they find it.
+  `.githooks/shared`. On main, and on each branch that merged main, nothing
+  runs it. `.githooks/.gitignore` hides it, so `git status` stays empty. The
+  setup scripts print the clean-up below when they find it.
 
-The clean-up is optional. It frees the space of the old checkout. Run it
-after the pull, in the main checkout and in each worktree that checked out
-the submodule:
+The clean-up is optional. It frees the space of the old checkout.
+
+Before the clean-up, merge main into each branch that you still commit on.
+A branch from before the move has the shim at `.githooks/commit-msg`, and the
+shim runs the hook in `.githooks/shared`. After the clean-up, each commit on
+such a branch fails with `commit message validation is not installed`. The
+setup scripts print the clean-up with no such warning.
+
+Run the clean-up after the pull, in the main checkout and in each worktree
+that checked out the submodule:
 
 ```sh
 rm -rf .githooks/shared "$(git rev-parse --git-dir)/modules/.githooks"
@@ -221,9 +240,30 @@ rmdir "$(git rev-parse --git-dir)/modules" 2>/dev/null || true
 git config --remove-section submodule..githooks/shared 2>/dev/null || true
 ```
 
+If a commit on an old branch fails after the clean-up, run
+`git submodule update --init .githooks/shared`, as the error says. This works
+with staged changes. Or merge main into the branch. The merge brings the
+copy, and the hook lets the merge message of git through. A merge that makes
+a merge commit stops when changes are staged. So run `git stash` before the
+merge and `git stash pop --index` after it.
+
 **Caution:** with `submodule.recurse=true`, do not delete `.githooks/shared`
 before the pull. The pull then fails with `fatal: cannot chdir`. To recover,
 run `git submodule deinit -f .githooks/shared`, then pull again.
+
+With `submodule.recurse=true`, a clone made with
+`git clone --recurse-submodules` needs one more line in the clean-up:
+
+```sh
+git config --unset-all submodule.active '^\.$' 2>/dev/null || true
+```
+
+Without it, `git switch` to a branch from before the move fails with
+`could not reset submodule index`. The work tree then stays half switched.
+`git reset --hard` is part of the recovery, and it discards the changes that
+are not committed. Save them first. Then run
+`rm -rf .gitmodules .githooks/shared`, `git reset --hard` and the line above,
+and switch again.
 
 `git worktree remove` fails on a worktree that checked out the submodule. Run
 the clean-up in it first, or use `--force`.
@@ -308,11 +348,11 @@ CI reads blobs, so it cannot see a copy that a checkout wrote with CRLF line
 ends. The LF rule in `.gitattributes` and `sync-hook.sh --check` cover that
 case.
 
-Most repositories that still use the submodule call the reusable workflow
-`commit-conventions.yml` of `qoax-reusables`. Some call this action directly,
-at `@v1` or pinned to v1.0.7. The migrate script replaces the workflows that it
-knows with the job above. For any other workflow, it stops and asks for a hand
-edit.
+A repository with the old layout calls this action at `@v1` or pinned to
+v1.0.7. Or it calls the reusable workflow `commit-conventions.yml` of
+`qoax-reusables`, which no longer exists. The migrate script replaces the
+workflows that it knows with the job above. For any other workflow, it stops
+and asks for a hand edit.
 
 The same checks work locally. Run them in the repository, with a clone of
 qoax-githooks:
@@ -336,9 +376,12 @@ releases do not move it.
 
 How a release reaches each repository:
 
-1. Dependabot looks for a new release once a week. It opens a pull request in
-   each repository that changes `@<old sha> # vA` to `@<new sha> # vB`. The
-   `allow` list in `templates/.github/dependabot.yml` keeps it to this action.
+1. Dependabot looks for a new release once a week. It skips a release that
+   is less than 3 days old, which is its default cooldown. So the pull
+   requests come 3 to 10 days after the tag, at the weekly run of each
+   repository. Dependabot opens a pull request in each repository that
+   changes `@<old sha> # vA` to `@<new sha> # vB`. The `allow` list in
+   `templates/.github/dependabot.yml` keeps it to this action.
 2. If the release kept `commit-msg`, the compare passes. Merge the pull
    requests by hand, or with `scripts/merge-sync-prs.sh`.
 3. If the release changed `commit-msg`, the compare fails and prints the sync
@@ -350,8 +393,9 @@ How a release reaches each repository:
 
 ## Releasing
 
-A tag starts a bump pull request in every repository that pins the action.
-So push a tag only for a real release.
+A tag starts a bump pull request in every repository that pins the action,
+3 to 10 days later (see [Versions](#versions)). So push a tag only for a real
+release.
 
 1. Each release has one line in `scripts/hook-releases.txt`: the tag and the
    blob of `commit-msg`. If the release changes the hook, the pull request of
