@@ -376,9 +376,12 @@ releases do not move it.
 
 How a release reaches each repository:
 
-1. Dependabot looks for a new release once a week. It opens a pull request in
-   each repository that changes `@<old sha> # vA` to `@<new sha> # vB`. The
-   `allow` list in `templates/.github/dependabot.yml` keeps it to this action.
+1. Dependabot looks for a new release once a week. It skips a release that
+   is less than 3 days old, which is its default cooldown. So the pull
+   requests come 3 to 10 days after the tag, at the weekly run of each
+   repository. Dependabot opens a pull request in each repository that
+   changes `@<old sha> # vA` to `@<new sha> # vB`. The `allow` list in
+   `templates/.github/dependabot.yml` keeps it to this action.
 2. If the release kept `commit-msg`, the compare passes. Merge the pull
    requests by hand, or with `scripts/merge-sync-prs.sh`.
 3. If the release changed `commit-msg`, the compare fails and prints the sync
@@ -390,8 +393,9 @@ How a release reaches each repository:
 
 ## Releasing
 
-A tag starts a bump pull request in every repository that pins the action.
-So push a tag only for a real release.
+A tag starts a bump pull request in every repository that pins the action,
+3 to 10 days later (see [Versions](#versions)). So push a tag only for a real
+release.
 
 1. Each release has one line in `scripts/hook-releases.txt`: the tag and the
    blob of `commit-msg`. If the release changes the hook, the pull request of
